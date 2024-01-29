@@ -35,6 +35,12 @@ Use your favorite browser to view `index.html`
 
 ### Deployment
 
+#### Intro & Project Structure
+
+The folder `/release/[runtime]` contains all files required exclusively for a spe
+
+#### Itch.io
+
 1. Include
 ```html
 <script type="text/javascript" src="vendor/hacktimer-1.1.3/HackTimer.min.js"></script>
