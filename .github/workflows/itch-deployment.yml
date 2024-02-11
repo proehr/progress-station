@@ -13,4 +13,4 @@ jobs:
           CHANNEL: html5
           ITCH_GAME: progress-station
           ITCH_USER: kringelgames
-          PACKAGE: ""
+          PACKAGE:
