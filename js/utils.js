@@ -345,10 +345,143 @@ class DomGetter {
 
     /**
      * @param {string} selector
-     * @returns {NodeList<HTMLElement>}
+     * @returns {NodeListOf<HTMLElement>}
      */
     allBySelector(selector) {
         return this.#parent.querySelectorAll(selector);
+    }
+}
+
+class LazyHtmlElement {
+
+    /** @var {HTMLElement|null|undefined} */
+    #element = undefined;
+
+    /** @var {function(): HTMLElement|null} */
+    #getFn;
+
+    /**
+     *
+     * @param {function(): HTMLElement|null} getFn
+     */
+    constructor(getFn) {
+        this.#getFn = getFn;
+    }
+
+    #findLazy() {
+        if (this.#element === undefined) {
+            this.#element = this.#getFn();
+        }
+
+        return this.#element;
+    }
+
+    /**
+     * @return {boolean}
+     */
+    found(){
+        return this.#findLazy() !== null;
+    }
+
+    get() {
+        return this.#findLazy();
+    }
+}
+
+class LazyHtmlElementCollection {
+    /** @var {HTMLElement[]|undefined} */
+    #elements = undefined;
+
+    /** @var {function(): Iterable<HTMLElement>} */
+    #getFn;
+
+    /**
+     *
+     * @param {function(): Iterable<HTMLElement>} getFn
+     */
+    constructor(getFn) {
+        this.#getFn = getFn;
+    }
+
+    #findLazy() {
+        if (this.#elements === undefined) {
+            this.#elements =[...this.#getFn()];
+        }
+
+        return this.#elements;
+    }
+
+    /**
+     * @return {boolean}
+     */
+    found(){
+        return this.#findLazy() !== null && this.#findLazy().length > 0;
+    }
+
+    /**
+     * @return {HTMLElement[]}
+     */
+    get() {
+        return this.#findLazy();
+    }
+}
+
+class LazyDomGetter {
+    /** @var {DomGetter} */
+    #domGetter;
+
+    /**
+     *
+     * @param {Document|Node|DomGetter} parent
+     */
+    constructor(parent) {
+        if (parent instanceof Node || parent instanceof Document) {
+            this.#domGetter = new DomGetter(parent);
+        } else if (parent instanceof DomGetter) {
+            this.#domGetter = parent;
+        }
+    }
+
+    /**
+     * @param {string} id dom id of the searched element
+     * @return {LazyHtmlElement}
+     */
+    byId(id) {
+        return new LazyHtmlElement(() => this.#domGetter.byId(id));
+    }
+
+    /**
+     * @param {string} className css class of the searched element
+     * @return {LazyHtmlElement}
+     */
+    byClass(className) {
+        return new LazyHtmlElement(() => this.#domGetter.byClass(className));
+    }
+
+    /**
+     *
+     * @param className css class of the searched elements
+     * @return {LazyHtmlElementCollection}
+     */
+    allByClass(className) {
+        return new LazyHtmlElementCollection(() => this.#domGetter.allByClass(className));
+    }
+
+    /**
+     *
+     * @param {string} selector
+     * @returns {LazyHtmlElement}
+     */
+    bySelector(selector) {
+        return new LazyHtmlElement(() => this.#domGetter.bySelector(selector));
+    }
+
+    /**
+     * @param {string} selector
+     * @returns {LazyHtmlElementCollection}
+     */
+    allBySelector(selector) {
+        return new LazyHtmlElementCollection(() => this.#domGetter.allBySelector(selector));
     }
 }
 
@@ -357,13 +490,31 @@ documentDomGetter.byId = function (id) {
     return document.getElementById(id);
 };
 
+const documentLazyDomGetter = new LazyDomGetter(documentDomGetter);
+
 const Dom = {
+    /**
+     * @param {Document|Node} parent
+     * @return {DomGetter}
+     */
     get: function (parent = undefined) {
         if (parent === undefined) {
             return documentDomGetter;
         }
 
         return new DomGetter(parent);
+    },
+
+    /**
+     * @param {Document|Node} parent
+     * @return {LazyDomGetter}
+     */
+    lazy: function (parent = undefined) {
+        if (parent === undefined) {
+            return documentLazyDomGetter;
+        }
+
+        return new LazyDomGetter(parent);
     },
     new: {
         /**
@@ -373,12 +524,50 @@ const Dom = {
          */
         fromTemplate: function (templateId) {
             return document.getElementById(templateId).content.firstElementChild.cloneNode(true);
-        }
+        },
+
+        /**
+         * Note: This method is very expensive and should not be called during updates.
+         *
+         * @param {String} html representing a single element
+         * @return {HTMLElement}
+         */
+        fromHtml: function (html) {
+            let template = document.createElement('template');
+            html = html.trim(); // Never return a text node of whitespace as the result
+            template.innerHTML = html;
+            // noinspection JSValidateTypes
+            return template.content.firstChild;
+        },
     },
 
     outerHeight: function (element) {
         const styles = window.getComputedStyle(element);
         const margin = parseFloat(styles.marginTop) + parseFloat(styles.marginBottom);
         return Math.ceil(element.offsetHeight + margin);
-    }
+    },
+
+    /**
+     * Note: `visibility: hidden` is considered visible for this function as it's still part of the dom & layout.
+     * Note 2: This method is very expensive and should not be called during updates.
+     *
+     * @param {HTMLElement} element
+     * @return {boolean}
+     *
+     */
+    isVisible: function (element) {
+        // Glorious stolen jQuery logic
+        return !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+    },
+
+    /**
+     * Note: `visibility: hidden` is considered visible for this function as its still part of the dom & layout.
+     * Note 2: This method is very expensive and should not be called during updates.
+     *
+     * @param {HTMLElement} element
+     * @return {boolean}
+     */
+    isHidden: function (element) {
+        return !this.isVisible(element);
+    },
 };

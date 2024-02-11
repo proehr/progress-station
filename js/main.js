@@ -27,13 +27,13 @@ const gridLoadBalanceEntries = [];
 
 /**
  *
- * @type {Object.<string, HTMLElement>}
+ * @type {Object<HTMLElement>}
  */
 const tabButtons = {
     modules: document.getElementById('modulesTabButton'),
     location: document.getElementById('locationTabButton'),
-    captainsLog: document.getElementById('captainsLogTabButton'),
     battles: document.getElementById('battleTabButton'),
+    galacticSecrets: document.getElementById('galacticSecretsTabButton'),
     attributes: document.getElementById('attributesTabButton'),
     settings: document.getElementById('settingsTabButton'),
 };
@@ -48,15 +48,17 @@ function applyMultipliers(value, multipliers) {
     return Math.round(value * finalMultiplier);
 }
 
-function applySpeed(value, ignoreDeath = false) {
-    return value * getGameSpeed(ignoreDeath) / updateSpeed;
+function applySpeed(value) {
+    return value * getGameSpeed() / updateSpeed;
 }
 
 function calculateHeat() {
     const danger = attributes.danger.getValue();
     const military = attributes.military.getValue();
+    const rawHeat = Effect.getTotalValue([EffectType.Heat]);
+    const calculatedHeat = Math.max(danger - military, 0) + rawHeat;
 
-    return Math.max(danger - military, 1);
+    return Math.max(1, calculatedHeat);
 }
 
 function populationDelta() {
@@ -67,11 +69,17 @@ function populationDelta() {
 }
 
 function updatePopulation() {
+    if (!gameData.state.areAttributesUpdated) return;
+
     gameData.population += applySpeed(populationDelta());
     gameData.population = Math.max(gameData.population, 1);
+
+    if (gameData.state === gameStates.BOSS_FIGHT && Math.round(gameData.population) === 1) {
+        gameData.transitionState(gameStates.DEAD);
+    }
 }
 
-function getPopulationProgressSpeedMultiplier(){
+function getPopulationProgressSpeedMultiplier() {
     // Random ass formula ᕕ( ᐛ )ᕗ
     // Pop 1 = x1
     // Pop 10 ~= x3.4
@@ -82,12 +90,8 @@ function getPopulationProgressSpeedMultiplier(){
     return Math.max(1, Math.pow(Math.round(gameData.population), 1 / 1.869));
 }
 
-function getGameSpeed(ignoreDeath = false) {
-    if (ignoreDeath) {
-        return baseGameSpeed * +!gameData.paused;
-    } else {
-        return baseGameSpeed * +isPlaying();
-    }
+function getGameSpeed() {
+    return baseGameSpeed;
 }
 
 function hideAllTooltips() {
@@ -97,6 +101,9 @@ function hideAllTooltips() {
     }
 }
 
+/**
+ * @param {string} selectedTab
+ */
 function setTab(selectedTab) {
     if (tabButtons[selectedTab].classList.contains('hidden')) {
         // Tab is not available
@@ -120,17 +127,27 @@ function setTab(selectedTab) {
     hideAllTooltips();
 }
 
-// noinspection JSUnusedGlobalSymbols used in HTML
-function setPause() {
-    gameData.paused = !gameData.paused;
-}
-
-function unpause() {
-    gameData.paused = false;
+// noinspection JSUnusedGlobalSymbols -- used in HTML
+function togglePause() {
+    switch (gameData.state) {
+        case gameStates.PLAYING:
+            gameData.transitionState(gameStates.PAUSED);
+            break;
+        case gameStates.PAUSED:
+            gameData.transitionState(gameStates.PLAYING);
+            break;
+        case gameStates.BOSS_FIGHT:
+            gameData.transitionState(gameStates.BOSS_FIGHT_PAUSED);
+            break;
+        case gameStates.BOSS_FIGHT_PAUSED:
+            gameData.transitionState(gameStates.BOSS_FIGHT);
+            break;
+    }
+    // Any other state is ignored
 }
 
 function setPointOfInterest(name) {
-    if (!isPlaying()) {
+    if (!gameData.state.canChangeActivation) {
         VFX.shakePlayButton();
         return;
     }
@@ -139,12 +156,15 @@ function setPointOfInterest(name) {
 }
 
 /**
- *
  * @param {Module} module
- * @param {HTMLInputElement} switchElement
  */
-function switchModuleActivation(module, switchElement) {
-    if (!switchElement.checked) {
+function switchModuleActivation(module) {
+    if (!gameData.state.canChangeActivation) {
+        VFX.shakePlayButton();
+        return;
+    }
+
+    if (module.isActive()) {
         module.setActive(false);
         return;
     }
@@ -152,7 +172,6 @@ function switchModuleActivation(module, switchElement) {
     const gridLoadAfterActivation = attributes.gridLoad.getValue() + module.getGridLoad();
     if (gridLoadAfterActivation > attributes.gridStrength.getValue()) {
         VFX.highlightText(Dom.get().bySelector(`#${module.domId} .gridLoad`), 'flash-text-denied', 'flash-text-denied');
-        switchElement.checked = false;
         return;
     }
 
@@ -160,7 +179,6 @@ function switchModuleActivation(module, switchElement) {
 }
 
 /**
- *
  * @param {ModuleComponent} component
  * @param {ModuleOperation} operation
  */
@@ -182,28 +200,9 @@ function tryActivateOperation(component, operation) {
     component.activateOperation(operation);
 }
 
-// function setBattle(name) {
-//     gameData.currentBattle = gameData.battleData[name];
-//     const nameElement = document.getElementById('battleName');
-//     nameElement.textContent = gameData.currentBattle.name;
-// }
-//
-// function startBattle(name) {
-//     setBattle(name);
-//     const progressBar = document.getElementById('battleProgressBar');
-//     progressBar.hidden = false;
-// }
-//
-// function concedeBattle() {
-//     gameData.currentBattle = null;
-//     GameEvents.GameOver.trigger({
-//         bossDefeated: false,
-//     });
-// }
-
 /**
- *
  * @param {string} domId
+ *
  * @return {HTMLElement}
  */
 function createRequiredRow(domId) {
@@ -214,9 +213,9 @@ function createRequiredRow(domId) {
 }
 
 /**
- *
  * @param {string} categoryName
  * @param {ModuleComponent} component
+ *
  * @returns {HTMLElement[]}
  */
 function createModuleLevel4Elements(categoryName, component) {
@@ -247,11 +246,20 @@ function createModuleLevel4Elements(categoryName, component) {
     return level4Elements;
 }
 
-function createModuleLevel3Elements(categoryName, module) {
+/**
+ * @param {string} categoryName
+ * @param {Module} module
+ * @param {HTMLSlotElement} requirementsSlot
+ *
+ * @return {HTMLElement[]}
+ */
+function createModuleLevel3Elements(categoryName, module, requirementsSlot) {
     const level3Elements = [];
 
     for (const component of module.components) {
         const level3Element = Dom.new.fromTemplate('level3TaskTemplate');
+        level3Element.id = component.domId;
+
         const level3DomGetter = Dom.get(level3Element);
 
         const nameCell = level3DomGetter.byClass('name');
@@ -267,6 +275,11 @@ function createModuleLevel3Elements(categoryName, module) {
         level3Elements.push(level3Element);
     }
 
+    const requirementsElement = Dom.new.fromTemplate('requirementsTemplate');
+    requirementsElement.id = 'row_requirements_module_' + module.name;
+    requirementsElement.classList.add('level3-requirements');
+    requirementsSlot.replaceWith(requirementsElement);
+
     return level3Elements;
 }
 
@@ -274,6 +287,7 @@ function createModuleLevel3Elements(categoryName, module) {
  *
  * @param {string} categoryName
  * @param {ModuleCategory} category
+ * @param {HTMLSlotElement} requirementsSlot
  * @return {HTMLElement[]}
  */
 function createModuleLevel2Elements(categoryName, category, requirementsSlot) {
@@ -281,8 +295,9 @@ function createModuleLevel2Elements(categoryName, category, requirementsSlot) {
 
     for (const module of category.modules) {
         const level2Element = Dom.new.fromTemplate('level2Template');
-        const level2DomGetter = Dom.get(level2Element);
         level2Element.id = module.domId;
+
+        const level2DomGetter = Dom.get(level2Element);
         const nameCell = level2DomGetter.byClass('name');
         nameCell.textContent = module.title;
         if (isDefined(module.description)) {
@@ -293,12 +308,17 @@ function createModuleLevel2Elements(categoryName, category, requirementsSlot) {
         /** @var {HTMLInputElement} */
         const switchElement = level2DomGetter.byClass('moduleActivationSwitch');
         switchElement.id = 'switch_' + module.name;
-        switchElement.checked = module.isActive();
-        switchElement.addEventListener('click', switchModuleActivation.bind(this, module, switchElement));
+        switchElement.addEventListener('click', switchModuleActivation.bind(this, module));
         level2DomGetter.byClass('moduleActivationLabel').for = switchElement.id;
+        initTooltip(level2DomGetter.byClass('maxLevel'), {
+            title: () => {
+                return `<b>x${(1 + module.maxLevel / 100).toFixed(2)} XP</b> for all operations in this module.`;
+            },
+            html: true,
+        });
 
         const level3Slot = level2DomGetter.byId('level3');
-        level3Slot.replaceWith(...createModuleLevel3Elements(categoryName, module));
+        level3Slot.replaceWith(...createModuleLevel3Elements(categoryName, module, level2DomGetter.byId('level3Requirements')));
 
         level2Elements.push(level2Element);
     }
@@ -357,7 +377,7 @@ function createLevel4SectorElements(pointsOfInterest, sectorName) {
     const level4Elements = [];
     for (const pointOfInterest of pointsOfInterest) {
         const level4Element = Dom.new.fromTemplate('level4PointOfInterestTemplate');
-        level4Element.id = 'row_' + pointOfInterest.name;
+        level4Element.id = pointOfInterest.domId;
 
         const level4DomGetter = Dom.get(level4Element);
         level4DomGetter.byClass('name').textContent = pointOfInterest.title;
@@ -414,7 +434,7 @@ function createLevel3SectorElement(sector, sectorName) {
 
 /**
  * Due to styling reasons, the two rendered levels are actually level 3 + 4 - don't get confused.
- * @param {Object.<string, Sector>} categoryDefinition
+ * @param {Object<Sector>} categoryDefinition
  * @param {string} domId
  */
 function createSectorsUI(categoryDefinition, domId) {
@@ -440,31 +460,53 @@ function createSectorsUI(categoryDefinition, domId) {
 
 /**
  *
+ * @param {DomGetter} domGetter
+ * @param {Battle} battle
+ */
+function initializeBattleElement(domGetter, battle) {
+    domGetter.byClass('name').textContent = battle.title;
+    const descriptionElement = domGetter.byClass('descriptionTooltip');
+    descriptionElement.ariaLabel = battle.title;
+    if (isDefined(battle.description)) {
+        descriptionElement.title = battle.description;
+    } else {
+        descriptionElement.removeAttribute('title');
+    }
+}
+
+/**
+ *
  * @param {Battle[]} battles
- * @param {string} categoryName
  * @return {HTMLElement[]}
  */
 function createLevel4BattleElements(battles) {
     const level4Elements = [];
     for (const battle of battles) {
         const level4Element = Dom.new.fromTemplate('level4BattleTemplate');
-        level4Element.id = 'row_' + battle.name;
+        level4Element.id = battle.domId;
         const domGetter = Dom.get(level4Element);
-        domGetter.byClass('name').textContent = battle.title;
-        const descriptionElement = domGetter.byClass('descriptionTooltip');
-        descriptionElement.ariaLabel = battle.title;
-        if (isDefined(battle.description)) {
-            descriptionElement.title = battle.description;
-        } else {
-            descriptionElement.removeAttribute('title');
-        }
+        initializeBattleElement(domGetter, battle);
         domGetter.byClass('rewards').textContent = battle.getRewardsDescription();
-        domGetter.byClass('progressBar').addEventListener('click', () => {
-            battle.toggle();
-        });
-        domGetter.byClass('radio').addEventListener('click', () => {
-            battle.toggle();
-        });
+        const clickListener = () => {
+            if (!gameData.state.canChangeActivation) {
+                VFX.shakePlayButton();
+                return;
+            }
+
+            if (battle instanceof BossBattle){
+                gameData.transitionState(gameStates.BOSS_FIGHT_INTRO);
+            } else {
+                battle.toggle();
+            }
+        };
+        domGetter.byClass('progressBar').addEventListener('click', clickListener);
+        domGetter.byClass('progressFill').classList.toggle('bossBattle', battle instanceof BossBattle);
+        domGetter.byClass('radio').addEventListener('click', clickListener);
+        if (battle instanceof BossBattle) {
+            domGetter.byClass('danger').innerHTML = battle.getEffectDescription();
+        } else {
+            formatValue(domGetter.bySelector('.danger > data'), battle.getEffect(EffectType.Danger));
+        }
 
         level4Elements.push(level4Element);
     }
@@ -478,7 +520,6 @@ function createUnfinishedBattlesUI() {
 
     level3Element.id = 'unfinishedBattles';
     level3Element.classList.remove('ps-3');
-    //     level3Element.classList.remove('mt-2');
 
     const domGetter = Dom.get(level3Element);
     domGetter.byClass('header-row').style.backgroundColor = colorPalette.TomatoRed;
@@ -503,20 +544,13 @@ function createLevel4FinishedBattleElements(battles) {
         level4Element.id = 'row_done_' + battle.name;
         level4Element.classList.add('hidden');
         const domGetter = Dom.get(level4Element);
+        initializeBattleElement(domGetter, battle);
         domGetter.bySelector('.progressBar .progressBackground').style.backgroundColor = lastLayerData.color;
         domGetter.bySelector('.progressBar .progressFill').style.width = '0%';
-        domGetter.byClass('name').textContent = battle.title;
-        const descriptionElement = domGetter.byClass('descriptionTooltip');
-        descriptionElement.ariaLabel = battle.title;
-        if (isDefined(battle.description)) {
-            descriptionElement.title = battle.description;
-        } else {
-            descriptionElement.removeAttribute('title');
-        }
         domGetter.byClass('action').classList.add('hidden');
         formatValue(
             domGetter.bySelector('.level > data'),
-            battle.maxLevel,
+            battle.targetLevel,
             {keepNumber: true},
         );
         domGetter.byClass('xpGain').classList.add('hidden');
@@ -555,8 +589,64 @@ function createFinishedBattlesUI() {
 
 function createBattlesUI(categoryDefinition, domId) {
     const slot = Dom.get().byId(domId);
-
     slot.replaceWith(createUnfinishedBattlesUI(), createFinishedBattlesUI());
+}
+
+function createGalacticSecretsUI() {
+    const level4Elements = [];
+    for (const key in galacticSecrets) {
+        const galacticSecret = galacticSecrets[key];
+        const level4Element = Dom.new.fromTemplate('level4GalacticSecretTemplate');
+        level4Element.id = galacticSecret.domId;
+        const domGetter = Dom.get(level4Element);
+        domGetter.byClass('component').textContent = galacticSecret.unlocks.component.title;
+        domGetter.byClass('operation').textContent = galacticSecret.unlocks.title;
+        const descriptionElement = domGetter.byClass('descriptionTooltip');
+        descriptionElement.ariaLabel = galacticSecret.title;
+        if (isDefined(galacticSecret.description)) {
+            descriptionElement.title = galacticSecret.description;
+        } else {
+            descriptionElement.removeAttribute('title');
+        }
+        domGetter.bySelector('.progressBar .progressFill').style.width = '0%';
+
+        domGetter.byClass('parent').textContent = galacticSecret.unlocks.module.title;
+        domGetter.byClass('effect').textContent = galacticSecret.unlocks.getEffectDescription(1);
+        formatValue(domGetter.bySelector('.gridLoad > data'), galacticSecret.unlocks.getGridLoad());
+
+        domGetter.byClass('progressBar').addEventListener('pointerdown', (event) => {
+            if (galacticSecret.isUnlocked) return;
+
+            const galacticSecretCost = calculateGalacticSecretCost();
+            if (galacticSecretCost > gameData.essenceOfUnknown) {
+                visuallyDenyGalacticSecretUnlock(galacticSecret);
+                return;
+            }
+
+            const tooltip = bootstrap.Tooltip.getInstance(event.currentTarget);
+            if (tooltip !== null) {
+                tooltip.hide();
+                tooltip.disable();
+            }
+            galacticSecret.inProgress = true;
+        });
+
+        level4Elements.push(level4Element);
+    }
+
+    window.addEventListener('pointerup', () => {
+        for (const key in galacticSecrets) {
+            const galacticSecret = galacticSecrets[key];
+            galacticSecret.inProgress = false;
+            const tooltip = bootstrap.Tooltip.getInstance(Dom.get().bySelector('#' + galacticSecret.domId + ' .progressBar'));
+            if (tooltip !== null) {
+                tooltip.enable();
+            }
+        }
+    });
+
+    const level4Slot = Dom.get().bySelector('#galacticSecrets tbody.level4');
+    level4Slot.append(...level4Elements);
 }
 
 function createModulesQuickDisplay() {
@@ -594,9 +684,10 @@ function createBattlesQuickDisplay() {
     for (const battleName in battles) {
         const battle = battles[battleName];
         const quickDisplayElement = Dom.new.fromTemplate('battleQuickTaskDisplayTemplate');
-        const componentDomGetter = Dom.get(quickDisplayElement);
+        const domGetter = Dom.get(quickDisplayElement);
         quickDisplayElement.classList.add(battle.name);
-        componentDomGetter.byClass('name').textContent = battle.title;
+        domGetter.byClass('name').textContent = battle.title;
+        domGetter.byClass('progressFill').classList.toggle('bossBattle', battle instanceof BossBattle);
 
         quickDisplayElements.push(quickDisplayElement);
     }
@@ -675,14 +766,16 @@ function createAttributeBalance(rowElement, effectTypes) {
 
     let onlyMultipliers = effectTypes.every((effectType) => effectType.operator === 'x');
 
-    if (onlyMultipliers) {
         const balanceEntryElement = Dom.new.fromTemplate('balanceEntryTemplate');
         const domGetter = Dom.get(balanceEntryElement);
         domGetter.byClass('operator').textContent = '';
-        domGetter.byClass('entryValue').textContent = '1';
+        if (onlyMultipliers) {
+            domGetter.byClass('entryValue').textContent = '1';
+        } else {
+            domGetter.byClass('entryValue').textContent = '0';
+        }
         domGetter.byClass('name').textContent = '(Base)';
         balanceElement.append(balanceEntryElement);
-    }
 
     for (const effectType of effectTypes) {
         for (const moduleName in modules) {
@@ -694,7 +787,7 @@ function createAttributeBalance(rowElement, effectTypes) {
                         operation.getEffect.bind(operation),
                         operation.getEffects.bind(operation),
                         effectType,
-                        module.title + ' ' + component.title + ': ' + operation.title,
+                        module.title + ': ' + component.title + ': ' + operation.title,
                         operation.isActive.bind(operation, 'inHierarchy'),
                     );
                 }
@@ -751,7 +844,7 @@ function createGridLoadBalance(rowElement) {
 
                 const balanceEntryElement = Dom.new.fromTemplate('balanceEntryTemplate');
                 const domGetter = Dom.get(balanceEntryElement);
-                domGetter.byClass('name').textContent = '(' + module.title + ' ' + component.title + ': ' + operation.title + ')';
+                domGetter.byClass('name').textContent = '(' + module.title + ': ' + component.title + ': ' + operation.title + ')';
                 domGetter.byClass('operator').textContent = '+';
                 formatValue(domGetter.byClass('entryValue'), operation.getGridLoad());
                 gridLoadBalanceEntries.push({
@@ -788,7 +881,7 @@ function createAttributesUI() {
     // Danger
     const dangerRow = createAttributeRow(attributes.danger);
     Dom.get(dangerRow).byClass('balance').classList.remove('hidden');
-    createAttributeBalance(dangerRow, [EffectType.Danger]);
+    createAttributeBalance(dangerRow, [EffectType.Danger, EffectType.DangerFactor]);
     rows.push(dangerRow);
 
     // Grid Load
@@ -807,7 +900,7 @@ function createAttributesUI() {
     // Growth
     const growthRow = createAttributeRow(attributes.growth);
     Dom.get(growthRow).byClass('balance').classList.remove('hidden');
-    createAttributeBalance(growthRow, [EffectType.Growth]);
+    createAttributeBalance(growthRow, [EffectType.Growth, EffectType.GrowthFactor]);
     rows.push(growthRow);
 
     // Heat
@@ -820,7 +913,7 @@ function createAttributesUI() {
     // Industry
     const industryRow = createAttributeRow(attributes.industry);
     Dom.get(industryRow).byClass('balance').classList.remove('hidden');
-    createAttributeBalance(industryRow, [EffectType.Industry]);
+    createAttributeBalance(industryRow, [EffectType.Industry, EffectType.IndustryFactor]);
     rows.push(industryRow);
 
     // Military
@@ -849,6 +942,10 @@ function createAttributesUI() {
 }
 
 function createEnergyGridDisplay() {
+    const tooltipText = createGridStrengthAndLoadDescription(createAttributeInlineHTML);
+    Dom.get().byId('gridLabel').title = tooltipText;
+    Dom.get().byId('gridStrength').title = tooltipText;
+
     const tickElementsTop = [];
     const tickElementsBottom = [];
     for (let i = 0; i < (5 * 8 + 1); i++) {
@@ -915,31 +1012,27 @@ function updateModulesQuickDisplay() {
  * @param {LayeredTask} battle
  */
 function setBattleProgress(progressBar, battle) {
+    const domGetter = Dom.get(progressBar);
     if (battle.isDone()) {
-        Dom.get(progressBar).byClass('progressBackground').style.backgroundColor = lastLayerData.color;
-        Dom.get(progressBar).byClass('progressFill').style.width = '0%';
-        Dom.get(progressBar).byClass('name').textContent = battle.title + ' defeated!';
+        domGetter.byClass('progressBackground').style.backgroundColor = lastLayerData.color;
+        domGetter.byClass('progressFill').style.width = '0%';
         return;
     }
 
-    if (battle instanceof BossBattle) {
-        Dom.get().byId('battleName').textContent = battle.title;
-        Dom.get(progressBar).byClass('name').textContent = battle.layerLabel + ' ' + battle.getDisplayedLevel();
-    }
-
-    const progressBarFill = Dom.get(progressBar).byClass('progressFill');
+    const progressBarFill = domGetter.byClass('progressFill');
     setProgress(progressBarFill, 1 - (battle.xp / battle.getMaxXp()), false);
 
-    if (battle instanceof BossBattle) {
-        progressBarFill.style.backgroundColor = layerData[battle.level].color;
+    if (!(battle instanceof BossBattle)) {
+        return;
+    }
 
-        if (battle.level < battle.maxLevel - 1 &&
-            battle.level < layerData.length - 1
-        ) {
-            Dom.get(progressBar).byClass('progressBackground').style.backgroundColor = layerData[battle.level + 1].color;
-        } else {
-            Dom.get(progressBar).byClass('progressBackground').style.backgroundColor = lastLayerData.color;
-        }
+    const layerLevel = battle.level % layerData.length;
+    progressBarFill.style.backgroundColor = layerData[layerLevel].color;
+    if (battle.getDisplayedLevel() === 1) {
+        domGetter.byClass('progressBackground').style.backgroundColor = lastLayerData.color;
+    } else {
+        const nextLayerLevel = (battle.level + 1) % layerData.length;
+        domGetter.byClass('progressBackground').style.backgroundColor = layerData[nextLayerLevel].color;
     }
 }
 
@@ -949,20 +1042,48 @@ function updateBattlesQuickDisplay() {
         const battle = battles[battleName];
         const quickDisplayElement = Dom.get().bySelector('#battleTabButton .quickTaskDisplay.' + battle.name);
         const componentDomGetter = Dom.get(quickDisplayElement);
-        if (!battle.isActive()) {
+        if (battle instanceof BossBattle) {
+            if (!isBossBattleAvailable()) {
+                quickDisplayElement.classList.add('hidden');
+                continue;
+            }
+        } else if (!battle.isActive()) {
             quickDisplayElement.classList.add('hidden');
             continue;
         }
 
         quickDisplayElement.classList.remove('hidden');
-        componentDomGetter.byClass('progressFill').classList.toggle('current', !battle.isDone());
-        formatValue(
-            componentDomGetter.byClass('level'),
-            battle.getDisplayedLevel(),
-            {keepNumber: true},
-        );
+        componentDomGetter.byClass('progressFill').classList.toggle('current', battle.isActive() && !battle.isDone());
+        const levelElement = componentDomGetter.byClass('level');
+        if (battle.isDone()) {
+            componentDomGetter.byClass('levelLabel').classList.add('hidden');
+            levelElement.classList.add('hidden');
+            componentDomGetter.byClass('defeatedLabel').classList.remove('hidden');
+        } else {
+            componentDomGetter.byClass('levelLabel').classList.remove('hidden');
+            levelElement.classList.remove('hidden');
+            componentDomGetter.byClass('defeatedLabel').classList.add('hidden');
+            formatValue(
+                levelElement,
+                battle.getDisplayedLevel(),
+                {keepNumber: true},
+            );
+        }
         setBattleProgress(componentDomGetter.byClass('progressBar'), battle);
     }
+}
+
+function updateLocationQuickDisplay() {
+    const activePointOfInterest = pointsOfInterest[gameData.activeEntities.pointOfInterest];
+    const quickDisplay = Dom.get().byId('locationQuickDisplay');
+    const title = activePointOfInterest.sector.title + ': ' + activePointOfInterest.title;
+    if (title !== quickDisplay.title) {
+        quickDisplay.title = title;
+        bootstrap.Tooltip.getInstance(quickDisplay).setContent({'.tooltip-inner': quickDisplay.title});
+    }
+    const domGetter = Dom.get(quickDisplay);
+    domGetter.byClass('sector').textContent = activePointOfInterest.sector.title;
+    domGetter.byClass('pointOfInterest').textContent = activePointOfInterest.title;
 }
 
 /**
@@ -976,21 +1097,18 @@ function updateBattlesQuickDisplay() {
 function setProgress(progressFillElement, progress, increasing = true) {
     // Clamp value to [0.0, 1.0]
     progress = Math.max(0.0, Math.min(progress, 1.0));
-    // Make sure to disable the transition if the progress is being reset
-    const previousProgress = parseFloat(progressFillElement.dataset.progress);
-    if ((increasing && (previousProgress - progress) >= 0.01) ||
-        (!increasing && (progress - previousProgress) >= 0.01)
-    ) {
-        progressFillElement.style.transitionDuration = '0s';
-    } else {
-        progressFillElement.style.removeProperty('transition-duration');
-    }
-    progressFillElement.dataset.progress = String(progress);
-    progressFillElement.style.width = (progress * 100) + '%';
-    let parentElement = progressFillElement.closest('.progress');
-    if (parentElement !== null) {
-        parentElement.ariaValueNow = (progress * 100).toFixed(1);
-    }
+    XFastdom.mutate(() => {
+        // Make sure to disable the transition if the progress is being reset
+        const previousProgress = parseFloat(progressFillElement.dataset.progress);
+        if ((increasing && (previousProgress - progress) >= 0.01) ||
+            (!increasing && (progress - previousProgress) >= 0.01)
+        ) {
+            progressFillElement.style.transitionDuration = '0s';
+        } else {
+            progressFillElement.style.removeProperty('transition-duration');
+        }
+        progressFillElement.style.width = (progress * 100) + '%';
+    });
 
     return progress;
 }
@@ -1031,10 +1149,165 @@ function updateRequirements(unfulfilledRequirements, context) {
 }
 
 let moduleCategoryRequirementsHtmlCache = '';
+const moduleRequirementsHtmlCache = {};
+const moduleComponentRequirementsHtmlCache = {};
+const moduleOperationRequirementsHtmlCache = {};
 
-function updateModuleCategoryRows() {
+function updateModuleOperationRow(operation, operationRequirementsContext) {
+    const row = Dom.get().byId(operation.domId);
+
+    if (!updateRequirements(operation.getUnfulfilledRequirements(), operationRequirementsContext)) {
+        row.classList.add('hidden');
+        return;
+    }
+    row.classList.remove('hidden');
+
+    const domGetter = Dom.get(row);
+    formatValue(domGetter.bySelector('.level > data'), operation.level, {keepNumber: true});
+    formatValue(domGetter.bySelector('.xpGain > data'), operation.getXpGain());
+    formatValue(domGetter.bySelector('.xpLeft > data'), operation.getXpLeft());
+
+    const progressFillElement = domGetter.byClass('progressFill');
+    setProgress(progressFillElement, operation.xp / operation.getMaxXp());
+    progressFillElement.classList.toggle('current', operation.isActive('self'));
+
+    domGetter.byClass('effect').textContent = operation.getEffectDescription();
+    domGetter.byClass('gridLoad').classList.toggle('hidden', attributes.gridStrength.getValue() === 0);
+}
+
+function updateModuleComponentRow(component, componentRequirementsContext) {
+    const row = document.getElementById(component.domId);
+
+    if (!updateRequirements(component.getUnfulfilledRequirements(), componentRequirementsContext)) {
+        row.classList.add('hidden');
+        return;
+    }
+
+    row.classList.remove('hidden');
+
+    const domGetter = Dom.get(row);
+    domGetter.byClass('gridLoad').classList.toggle('hidden', attributes.gridStrength.getValue() === 0);
+
     // noinspection JSUnusedGlobalSymbols
-    const requirementsContext = {
+    const operationRequirementsContext = {
+        hasUnfulfilledRequirements: false,
+        requirementsElement: Dom.get().byId('row_requirements_component_' + component.name),
+        setHtmlCache: (newValue) => {
+            moduleOperationRequirementsHtmlCache[component.name] = newValue;
+        },
+        getHtmlCache: () => {
+            if (moduleOperationRequirementsHtmlCache.hasOwnProperty(component.name)) {
+                return moduleOperationRequirementsHtmlCache[component.name];
+            }
+
+            return '';
+        },
+    };
+
+    for (const operation of component.operations) {
+        updateModuleOperationRow(operation, operationRequirementsContext);
+    }
+
+    operationRequirementsContext.requirementsElement.classList.toggle('hidden', !operationRequirementsContext.hasUnfulfilledRequirements);
+}
+
+function updateModuleRow(module, moduleRequirementsContext) {
+    const row = document.getElementById(module.domId);
+
+    if (!updateRequirements(module.getUnfulfilledRequirements(), moduleRequirementsContext)) {
+        row.classList.add('hidden');
+        return;
+    }
+
+    row.classList.remove('hidden');
+    const isActive = module.isActive();
+    row.classList.toggle('inactive', !isActive);
+
+    const domGetter = Dom.get(row);
+    const level2Header = domGetter.byClass('level2-header');
+    level2Header.classList.toggle('bg-light', isActive);
+    level2Header.classList.toggle('text-dark', isActive);
+    level2Header.classList.toggle('bg-dark', !isActive);
+    level2Header.classList.toggle('text-light', !isActive);
+
+    domGetter.byClass('moduleActivationSwitch').checked = module.isActive();
+    formatValue(domGetter.byClass('level'), module.getLevel());
+
+    const maxLevelElement = domGetter.byClass('maxLevel');
+    if (gameData.bossEncounterCount > 0) {
+        maxLevelElement.classList.remove('hidden');
+        formatValue(domGetter.bySelector('.maxLevel > data'), module.maxLevel, {keepNumber: true});
+    } else {
+        maxLevelElement.classList.add('hidden');
+    }
+
+    if (attributes.gridStrength.getValue() >= 1) {
+        domGetter.byClass('gridLoad').classList.remove('hidden');
+        formatValue(domGetter.bySelector('.gridLoad > data'), module.getGridLoad());
+    } else {
+        domGetter.byClass('gridLoad').classList.add('hidden');
+    }
+
+    // noinspection JSUnusedGlobalSymbols
+    const componentRequirementsContext = {
+        hasUnfulfilledRequirements: false,
+        requirementsElement: Dom.get().byId('row_requirements_module_' + module.name),
+        setHtmlCache: (newValue) => {
+            moduleComponentRequirementsHtmlCache[module.name] = newValue;
+        },
+        getHtmlCache: () => {
+            if (moduleComponentRequirementsHtmlCache.hasOwnProperty(module.name)) {
+                return moduleComponentRequirementsHtmlCache[module.name];
+            }
+
+            return '';
+        },
+    };
+
+    for (const component of module.components) {
+        updateModuleComponentRow(component, componentRequirementsContext);
+    }
+
+    componentRequirementsContext.requirementsElement.classList.toggle('hidden', !componentRequirementsContext.hasUnfulfilledRequirements);
+}
+
+function updateModuleCategoryRow(category, categoryRequirementsContext) {
+    const categoryRow = Dom.get().byId(category.domId);
+
+    const categoryAvailable = updateRequirements(category.getUnfulfilledRequirements(), categoryRequirementsContext);
+    if (!categoryAvailable) {
+        categoryRow.classList.add('hidden');
+        // continue;
+    }
+
+    categoryRow.classList.remove('hidden');
+
+    // noinspection JSUnusedGlobalSymbols
+    const moduleRequirementsContext = {
+        hasUnfulfilledRequirements: false,
+        requirementsElement: Dom.get().byId('row_requirements_category_' + category.name),
+        setHtmlCache: (newValue) => {
+            moduleRequirementsHtmlCache[category.name] = newValue;
+        },
+        getHtmlCache: () => {
+            if (moduleRequirementsHtmlCache.hasOwnProperty(category.name)) {
+                return moduleRequirementsHtmlCache[category.name];
+            }
+
+            return '';
+        },
+    };
+
+    for (const module of category.modules) {
+        updateModuleRow(module, moduleRequirementsContext);
+    }
+
+    moduleRequirementsContext.requirementsElement.classList.toggle('hidden', !moduleRequirementsContext.hasUnfulfilledRequirements);
+}
+
+function updateModulesUI() {
+    // noinspection JSUnusedGlobalSymbols
+    const categoryRequirementsContext = {
         hasUnfulfilledRequirements: false,
         requirementsElement: Dom.get().byId('row_requirements_moduleCategory'),
         setHtmlCache: (newValue) => {
@@ -1044,114 +1317,10 @@ function updateModuleCategoryRows() {
     };
     for (const key in moduleCategories) {
         const category = moduleCategories[key];
-
-        const categoryAvailable = updateRequirements(category.getUnfulfilledRequirements(), requirementsContext);
-        Dom.get().byId(category.domId).classList.toggle('hidden', !categoryAvailable);
+        updateModuleCategoryRow(category, categoryRequirementsContext);
     }
 
-    requirementsContext.requirementsElement.classList.toggle('hidden', !requirementsContext.hasUnfulfilledRequirements);
-}
-
-const moduleRequirementsHtmlCache = {};
-
-function updateModuleRows() {
-    // We need to iterate on the categories to correctly scope the requirements
-    for (const key in moduleCategories) {
-        const category = moduleCategories[key];
-
-        // noinspection JSUnusedGlobalSymbols
-        const requirementsContext = {
-            hasUnfulfilledRequirements: false,
-            requirementsElement: Dom.get().byId('row_requirements_category_' + category.name),
-            setHtmlCache: (newValue) => {
-                moduleRequirementsHtmlCache[category.name] = newValue;
-            },
-            getHtmlCache: () => {
-                if (moduleRequirementsHtmlCache.hasOwnProperty(category.name)) {
-                    return moduleRequirementsHtmlCache[category.name];
-                }
-
-                return '';
-            },
-        };
-
-        for (const module of category.modules) {
-            const row = document.getElementById(module.domId);
-
-            if (!updateRequirements(module.getUnfulfilledRequirements(), requirementsContext)) {
-                row.classList.add('hidden');
-                continue;
-            }
-
-            row.classList.remove('hidden');
-            const isActive = module.isActive();
-            row.classList.toggle('inactive', !isActive);
-
-            const domGetter = Dom.get(row);
-            const level2Header = domGetter.byClass('level2-header');
-            level2Header.classList.toggle('bg-light', isActive);
-            level2Header.classList.toggle('text-dark', isActive);
-            level2Header.classList.toggle('bg-dark', !isActive);
-            level2Header.classList.toggle('text-light', !isActive);
-
-            formatValue(domGetter.byClass('level'), module.getLevel());
-            formatValue(domGetter.bySelector('.gridLoad > data'), module.getGridLoad());
-        }
-
-        requirementsContext.requirementsElement.classList.toggle('hidden', !requirementsContext.hasUnfulfilledRequirements);
-    }
-}
-
-const moduleOperationRequirementsHtmlCache = {};
-
-function updateModuleOperationRows() {
-    for (const key in moduleComponents) {
-        const component = moduleComponents[key];
-
-        // noinspection JSUnusedGlobalSymbols
-        const requirementsContext = {
-            hasUnfulfilledRequirements: false,
-            requirementsElement: Dom.get().byId('row_requirements_component_' + component.name),
-            setHtmlCache: (newValue) => {
-                moduleOperationRequirementsHtmlCache[component.name] = newValue;
-            },
-            getHtmlCache: () => {
-                if (moduleOperationRequirementsHtmlCache.hasOwnProperty(component.name)) {
-                    return moduleOperationRequirementsHtmlCache[component.name];
-                }
-
-                return '';
-            },
-        };
-
-        for (const operation of component.operations) {
-            const row = Dom.get().byId(operation.domId);
-
-            if (!updateRequirements(operation.getUnfulfilledRequirements(), requirementsContext)) {
-                row.classList.add('hidden');
-                continue;
-            }
-            row.classList.remove('hidden');
-
-            const domGetter = Dom.get(row);
-            formatValue(domGetter.bySelector('.level > data'), operation.level, {keepNumber: true});
-            formatValue(domGetter.bySelector('.xpGain > data'), operation.getXpGain());
-            formatValue(domGetter.bySelector('.xpLeft > data'), operation.getXpLeft());
-
-            let maxLevelElement = domGetter.bySelector('.maxLevel > data');
-            formatValue(maxLevelElement, operation.maxLevel, {keepNumber: true});
-            maxLevelElement = maxLevelElement.parentElement;
-            gameData.rebirthOneCount > 0 ? maxLevelElement.classList.remove('hidden') : maxLevelElement.classList.add('hidden');
-
-            const progressFillElement = domGetter.byClass('progressFill');
-            setProgress(progressFillElement, operation.xp / operation.getMaxXp());
-            progressFillElement.classList.toggle('current', operation.isActive('self'));
-
-            domGetter.byClass('effect').textContent = operation.getEffectDescription();
-        }
-
-        requirementsContext.requirementsElement.classList.toggle('hidden', !requirementsContext.hasUnfulfilledRequirements);
-    }
+    categoryRequirementsContext.requirementsElement.classList.toggle('hidden', !categoryRequirementsContext.hasUnfulfilledRequirements);
 }
 
 let battleRequirementsHtmlCache = '';
@@ -1161,6 +1330,7 @@ function updateBattleRows() {
     const maxBattles = maximumAvailableBattles();
     let visibleBattles = 0;
     const visibleFactions = {};
+    const bossRow = Dom.get().byId(bossBattle.domId);
 
     // noinspection JSUnusedGlobalSymbols
     const requirementsContext = {
@@ -1177,13 +1347,15 @@ function updateBattleRows() {
     for (const key in battles) {
         /** @type {Battle} */
         const battle = battles[key];
-        const row = Dom.get().byId('row_' + battle.name);
+        const row = Dom.get().byId(battle.domId);
 
         if (battle.isDone()) {
             row.classList.add('hidden');
             Dom.get().byId('row_done_' + battle.name).classList.remove('hidden');
             continue;
         }
+
+        Dom.get().byId('row_done_' + battle.name).classList.add('hidden');
 
         const unfulfilledRequirements = [];
         if (visibleBattles >= maxBattles.limit) {
@@ -1206,15 +1378,20 @@ function updateBattleRows() {
             });
         }
 
-        if (!updateRequirements(unfulfilledRequirements.length === 0 ? null : unfulfilledRequirements, requirementsContext)) {
-            row.classList.add('hidden');
-            continue;
+        if (!(battle instanceof BossBattle)) {
+            if (!updateRequirements(
+                unfulfilledRequirements.length === 0 ? null : unfulfilledRequirements,
+                requirementsContext)
+            ) {
+                row.classList.add('hidden');
+                continue;
+            }
+
+            visibleBattles++;
+            visibleFactions[battle.faction.name] = true;
+
+            row.classList.remove('hidden');
         }
-
-        visibleBattles++;
-        visibleFactions[battle.faction.name] = true;
-
-        row.classList.remove('hidden');
 
         const domGetter = Dom.get(row);
         formatValue(domGetter.bySelector('.level > data'), battle.getDisplayedLevel(), {keepNumber: true});
@@ -1226,7 +1403,35 @@ function updateBattleRows() {
         const isActive = battle.isActive();
         domGetter.byClass('progressFill').classList.toggle('current', isActive);
         domGetter.byClass('active').style.backgroundColor = isActive ? colorPalette.TomatoRed : colorPalette.White;
-        formatValue(domGetter.bySelector('.danger > data'), battle.getEffect(EffectType.Danger));
+
+        if (isBossBattleAvailable() &&
+            visibleBattles === bossBattle.distance
+        ) {
+            if (row.nextElementSibling !== bossRow) { // Do not update the DOM if not necessary
+                row.after(bossRow);
+            }
+        }
+    }
+
+    if (isBossBattleAvailable() && !bossBattle.isDone()) {
+        bossRow.classList.remove('hidden');
+        if (visibleBattles < bossBattle.distance) {
+            // There are fewer battles visible than the boss distance --> move boss in last position.
+            // Is the bossRow already the last element?
+            if (bossRow.nextElementSibling !== requirementsContext.requirementsElement) { // Do not update the DOM if not necessary
+                requirementsContext.requirementsElement.before(bossRow);
+            }
+        } else if (bossBattle.distance === 0) {
+            // Boss should be in first position.
+            // Is the bossRow already the first element?
+            if (bossRow.previousElementSibling !== null) { // Do not update the DOM if not necessary
+                Dom.get()
+                    .bySelector('#unfinishedBattles tbody.level4')
+                    .prepend(bossRow);
+            }
+        }
+    } else {
+        bossRow.classList.add('hidden');
     }
 
     requirementsContext.requirementsElement.classList.toggle('hidden', !requirementsContext.hasUnfulfilledRequirements);
@@ -1269,7 +1474,7 @@ function updateSectorRows() {
         };
 
         for (const pointOfInterest of sector.pointsOfInterest) {
-            const row = Dom.get().byId('row_' + pointOfInterest.name);
+            const row = Dom.get().byId(pointOfInterest.domId);
 
             if (!updateRequirements(pointOfInterest.getUnfulfilledRequirements(), requirementsContext)) {
                 row.classList.add('hidden');
@@ -1292,9 +1497,22 @@ function updateSectorRows() {
     sectorRequirementsContext.requirementsElement.classList.toggle('hidden', !sectorRequirementsContext.hasUnfulfilledRequirements);
 }
 
-function updateHeaderRows() {
-    for (const maxLevelElement of document.querySelectorAll('.level3 .maxLevel')) {
-        maxLevelElement.classList.toggle('hidden', gameData.rebirthOneCount === 0);
+function updateGalacticSecretRows() {
+    for (const key in galacticSecrets) {
+        const galacticSecret = galacticSecrets[key];
+        const row = Dom.get().byId(galacticSecret.domId);
+        const domGetter = Dom.get(row);
+        const isUnlocked = galacticSecret.isUnlocked;
+        const progressFillElement = domGetter.byClass('progressFill');
+        if (isUnlocked) {
+            progressFillElement.classList.add('unlocked');
+            domGetter.byClass('progressBar').classList.add('unlocked');
+            progressFillElement.style.removeProperty('width');
+        } else {
+            progressFillElement.classList.toggle('unlocked', galacticSecret.inProgress);
+            domGetter.byClass('progressBar').classList.remove('unlocked');
+            setProgress(progressFillElement, galacticSecret.unlockProgress);
+        }
     }
 }
 
@@ -1341,7 +1559,7 @@ function updateEnergyGridBar() {
         gridLoadElement.style.left = '0';
         gridLoadElement.style.removeProperty('translate');
         gridLoadElement.style.removeProperty('right');
-    } else if (currentGridLoad === 1) {
+    } else if (currentGridLoad === 1 && currentGridStrength === 1) {
         gridLoadElement.style.left = '50%';
         gridLoadElement.style.translate = '-50% 0';
         gridLoadElement.style.removeProperty('right');
@@ -1358,9 +1576,15 @@ function updateEnergyGridBar() {
     formatValue(Dom.get(gridStrengthElement).bySelector('data'), currentGridStrength, {keepNumber: true});
 
     const numberOfBoxes = Dom.get().allBySelector('#gridStrength > .grid-strength-box').length;
-    for (let i = numberOfBoxes; i < currentGridStrength; i++) {
-        const gridStrengthBox = Dom.new.fromTemplate('gridStrengthBoxTemplate');
-        Dom.get().byId('gridStrength').append(gridStrengthBox);
+    if (numberOfBoxes > currentGridStrength) {
+        for (let i = 0; i < (numberOfBoxes - currentGridStrength); i++) {
+            Dom.get().bySelector('#gridStrength .grid-strength-box').remove();
+        }
+    } else if (currentGridStrength > numberOfBoxes) {
+        for (let i = numberOfBoxes; i < currentGridStrength; i++) {
+            const gridStrengthBox = Dom.new.fromTemplate('gridStrengthBoxTemplate');
+            Dom.get().byId('gridStrength').append(gridStrengthBox);
+        }
     }
 
     Dom.get().allBySelector('#gridStrength > .grid-strength-box').forEach((gridStrengthBox, index) => {
@@ -1416,16 +1640,30 @@ function updateHeatDisplay() {
 }
 
 function updateText() {
-    //Sidebar
-    document.getElementById('ageDisplay').textContent = String(daysToYears(gameData.days));
-    document.getElementById('dayDisplay').textContent = String(getDay()).padStart(3, '0');
-    document.getElementById('stationAge').textContent = String(daysToYears(gameData.totalDays));
+    const cyclesSinceLastEncounterElement = Dom.get().byId('cyclesSinceLastEncounter');
+    const cyclesTotalElement = Dom.get().byId('cyclesTotal');
+    if (gameData.bossEncounterCount === 0) {
+        cyclesSinceLastEncounterElement.classList.add('hidden');
+        cyclesTotalElement.classList.replace('secondary-stat', 'primary-stat');
+        cyclesTotalElement.classList.remove('help-text');
+    } else {
+        cyclesSinceLastEncounterElement.classList.remove('hidden');
+        // TODO adjust formatting & use formatValue
+        Dom.get(cyclesSinceLastEncounterElement).bySelector('data').textContent = Math.round(gameData.cycles).toLocaleString('en-US');
+        cyclesTotalElement.classList.replace('primary-stat', 'secondary-stat');
+        cyclesTotalElement.classList.add('help-text');
+    }
+    // TODO adjust formatting & use formatValue
+    Dom.get(cyclesTotalElement).bySelector('data').textContent = Math.round(startCycle + gameData.totalCycles).toLocaleString('en-US');
     const pauseButton = document.getElementById('pauseButton');
-    if (gameData.paused) {
+    if (gameData.state === gameStates.PAUSED || gameData.state === gameStates.BOSS_FIGHT_PAUSED) {
         pauseButton.textContent = 'Play';
         pauseButton.classList.replace('btn-secondary', 'btn-primary');
-    } else {
+    } else if (gameData.state === gameStates.PLAYING || gameData.state === gameStates.BOSS_FIGHT) {
         pauseButton.textContent = 'Pause';
+        pauseButton.classList.replace('btn-primary', 'btn-secondary');
+    } else {
+        pauseButton.textContent = 'Intermission';
         pauseButton.classList.replace('btn-primary', 'btn-secondary');
     }
 
@@ -1436,7 +1674,15 @@ function updateText() {
     updateEnergyGridBar();
     formatValue(Dom.get().bySelector('#attributeRows > .gridLoad .value'), attributes.gridLoad.getValue());
     formatValue(Dom.get().bySelector('#attributeRows > .gridStrength .value'), attributes.gridStrength.getValue());
-    formatValue(Dom.get().bySelector('#attributeRows > .gridStrength .delta'), gridStrength.getDelta());
+    const delta = gridStrength.getDelta();
+    const gridStrengthDeltaElement = Dom.get().bySelector('#attributeRows > .gridStrength .delta');
+    if (delta < 0.1) {
+        formatValue(gridStrengthDeltaElement, 1, {forceInteger: true});
+        gridStrengthDeltaElement.nextSibling.textContent = ' per ' + (1 / delta).toFixed(0) + ' cycles';
+    } else {
+        formatValue(gridStrengthDeltaElement, delta);
+        gridStrengthDeltaElement.nextSibling.textContent = ' per cycle';
+    }
 
     const growth = attributes.growth.getValue();
     formatValue(Dom.get().byId('growthDisplay'), growth);
@@ -1461,23 +1707,49 @@ function updateText() {
     const research = attributes.research.getValue();
     formatValue(Dom.get().byId('researchDisplay'), research);
     formatValue(Dom.get().bySelector('#attributeRows > .research .value'), research);
+
+    const essenceOfUnknown = attributes.essenceOfUnknown.getValue();
+    formatValue(Dom.get().byId('essenceOfUnknownDisplay'), essenceOfUnknown, {forceInteger: true, keepNumber: true});
+
+    const galacticSecretCost = calculateGalacticSecretCost();
+    formatValue(Dom.get().byId('galacticSecretCostDisplay'), galacticSecretCost, {forceInteger: true, keepNumber: true});
 }
 
 function updateHtmlElementRequirements() {
-    for (const htmlElementWithRequirement of elementRequirements){
+    for (const key in htmlElementRequirements) {
+        const htmlElementWithRequirement = htmlElementRequirements[key];
         const completed = htmlElementWithRequirement.isCompleted();
-        for (const element of htmlElementWithRequirement.elementsWithRequirements){
-            element.classList.toggle('hidden', !completed);
+        const visible = htmlElementWithRequirement.isVisible();
+        for (const element of htmlElementWithRequirement.elementsWithRequirements) {
+            if (element instanceof LazyHtmlElement) {
+                if (element.found()) {
+                    element.get().classList.toggle('hidden', !completed);
+                }
+            } else if (element instanceof LazyHtmlElementCollection) {
+                if (element.found()) {
+                    element.get().forEach(element => {
+                        element.classList.toggle('hidden', !completed);
+                    });
+                }
+            } else {
+                element.classList.toggle('hidden', !completed);
+            }
         }
-        for (const element of htmlElementWithRequirement.elementsToShowRequirements){
-            element.classList.toggle('hidden', completed);
+        const requirementHtml = htmlElementWithRequirement.toHtml();
+        for (const element of htmlElementWithRequirement.elementsToShowRequirements) {
+            if (completed || !visible) {
+                element.classList.add('hidden');
+            } else {
+                element.classList.remove('hidden');
+                element.innerHTML = requirementHtml;
+            }
         }
     }
 }
 
 function updateBodyClasses() {
-    document.getElementById('body').classList.toggle('game-paused', !isPlaying());
-    document.getElementById('body').classList.toggle('game-playing', isPlaying());
+    document.getElementById('body').classList.toggle('game-paused', gameData.state === gameStates.PAUSED);
+    document.getElementById('body').classList.toggle('game-playing', gameData.state === gameStates.PLAYING);
 }
 
 function doTasks() {
@@ -1489,14 +1761,25 @@ function doTasks() {
 
     for (const battleName of gameData.activeEntities.battles) {
         const battle = battles[battleName];
-        if (battle.isDone() && gameData.selectedTab === 'battles') {
-            // Quality of life - a battle is done and the player is already on the battles tab
-            // or visited it first after the battle was completed --> deactivate battle
-            battle.stop();
-            VFX.flash(Dom.get().bySelector('#row_done_' + battle.name + ' .progressBar'));
+        if (battle.isDone()) {
+            if (gameData.selectedTab === 'battles') {
+                // Quality of life - a battle is done and the player is already on the battles tab
+                // or visited it first after the battle was completed --> deactivate battle
+                battle.stop();
+                // TODO VFX should not be called, but triggered via Event
+                VFX.flash(Dom.get().bySelector('#row_done_' + battle.name + ' .progressBar'));
+            }
+
+            continue;
         }
 
         battle.do();
+        if (gameData.state === gameStates.PLAYING &&
+            isBossBattleAvailable() &&
+            battle.isDone()
+        ) {
+            bossBattle.decrementDistance();
+        }
     }
 
     gridStrength.do();
@@ -1519,27 +1802,89 @@ function calculateGridLoad() {
     return gridLoad;
 }
 
-function daysToYears(days) {
-    return Math.floor(days / 365);
+function calculateGalacticSecretCost() {
+    const unlockedGalacticSecrets = Object.values(galacticSecrets)
+        .filter(galacticSecret => galacticSecret.isUnlocked)
+        .length;
+    return Math.pow(3, unlockedGalacticSecrets);
 }
 
-function yearsToDays(years) {
-    return years * 365;
-}
+function increaseCycle() {
+    if (!gameData.state.isTimeProgressing) return;
 
-function getDay() {
-    return Math.floor(gameData.days - daysToYears(gameData.days) * 365);
-}
-
-function increaseDays() {
     const increase = applySpeed(1);
-    if (gameData.days >= getLifespan()) return;
+    gameData.cycles += increase;
+    gameData.totalCycles += increase;
 
-    gameData.days += increase;
-    gameData.totalDays += increase;
+    if (!isBossBattleAvailable() && gameData.cycles >= getBossAppearanceCycle()) {
+        gameData.bossBattleAvailable = true;
+        gameData.transitionState(gameStates.PAUSED);
+        GameEvents.BossAppearance.trigger(undefined);
+    }
+}
 
-    if (gameData.days >= getLifespan()) {
-        GameEvents.Death.trigger(undefined);
+function updateBossDistance() {
+    if (gameData.state !== gameStates.PLAYING) return;
+    if (!isBossBattleAvailable()) return;
+
+    // How much time has past since the boss' arrival?
+    const overtime = gameData.cycles - getBossAppearanceCycle();
+    // Translate the elapsed time into distance according to config
+    bossBattle.coveredDistance = Math.floor(overtime / bossBattleApproachInterval);
+}
+
+function visuallyDenyGalacticSecretUnlock(galacticSecret) {
+    VFX.shakeElement(Dom.get().bySelector(`#${galacticSecret.domId} .progress`), galacticSecret.domId);
+    VFX.highlightText(Dom.get().byId('galacticSecretCostDisplay').parentElement, 'flash-text-denied', 'flash-text-denied');
+    VFX.highlightText(Dom.get().byId('essenceOfUnknownDisplay'), 'flash-text-denied', 'flash-text-denied');
+}
+
+function progressGalacticSecrets() {
+    for (const key in galacticSecrets) {
+        const galacticSecret = galacticSecrets[key];
+        galacticSecret.update();
+        if (galacticSecret.unlockProgress < 1) {
+            continue;
+        }
+
+        const galacticSecretCost = calculateGalacticSecretCost();
+        if (galacticSecretCost > gameData.essenceOfUnknown) {
+            visuallyDenyGalacticSecretUnlock(galacticSecret);
+        } else {
+            // Unlock & pay the required essence of unknown
+            galacticSecret.isUnlocked = true;
+            galacticSecret.inProgress = false;
+            gameData.essenceOfUnknown -= galacticSecretCost;
+            GameEvents.TaskLevelChanged.trigger({
+                type: galacticSecret.type,
+                name: galacticSecret.name,
+                previousLevel: 0,
+                nextLevel: 1,
+            });
+        }
+        galacticSecret.unlockProgress = 0;
+    }
+}
+
+/**
+ * Activate the first/saved operation of any component that doesn't
+ * have yet an active operation, e.g. because it was blocked.
+ */
+function activateComponentOperations() {
+    for (const key in moduleComponents) {
+        const component = moduleComponents[key];
+
+        if (component.getUnfulfilledRequirements() !== null) continue;
+        if (component.getActiveOperation() !== null) continue;
+
+        // TODO include in save game?
+        let activeOperation = component.operations.find(operation => operation.isActive('self'));
+        // No operation was active yet --> fall back to first configured operation as fallback
+        if (isUndefined(activeOperation)) {
+            activeOperation = component.operations[0];
+            activeOperation.setActive(true);
+        }
+        component.activeOperation = activeOperation;
     }
 }
 
@@ -1547,7 +1892,14 @@ function increaseDays() {
  *
  * @param {HTMLDataElement} dataElement
  * @param {number} value
- * @param {{prefixes?: string[], unit?: string, forceSign?: boolean, keepNumber?: boolean, forceInteger?: boolean}} config
+ * @param {{
+ *     prefixes?: string[],
+ *     unit?: string,
+ *     forceSign?: boolean,
+ *     keepNumber?: boolean,
+ *     forceInteger?: boolean,
+ *     toStringFn?: function(number): string,
+ * }} config
  */
 function formatValue(dataElement, value, config = {}) {
     // TODO render full number + unit into dataElement.title
@@ -1559,12 +1911,15 @@ function formatValue(dataElement, value, config = {}) {
         forceSign: false,
         keepNumber: false,
         forceInteger: false,
+        toStringFn: undefined,
     };
     config = Object.assign({}, defaultConfig, config);
 
     const toString = (value) => {
         if (config.forceInteger || Number.isInteger(value)) {
             return value.toFixed(0);
+        } else if (isFunction(config.toStringFn)) {
+            return config.toStringFn(value);
         } else if (Math.abs(value) < 1) {
             return value.toFixed(2);
         } else {
@@ -1579,6 +1934,7 @@ function formatValue(dataElement, value, config = {}) {
     if (config.forceSign) {
         if (Math.abs(value) <= 0.001) {
             prefix = '±';
+            value = Math.abs(value);
         } else if (value > 0) {
             prefix = '+';
         }
@@ -1628,11 +1984,7 @@ function getBattleElement(taskName) {
         return;
     }
     const battle = battles[taskName];
-    if (battle instanceof BossBattle) {
-        return document.getElementById(battle.progressBarId);
-    }
-
-    return Dom.get().byId('row_' + battle.name);
+    return Dom.get().byId(battle.domId);
 }
 
 function getPointOfInterestElement(name) {
@@ -1645,6 +1997,22 @@ function getPointOfInterestElement(name) {
     return document.getElementById(pointOfInterest.domId);
 }
 
+/**
+ * @param {boolean} force
+ */
+function toggleVfxFollowProgressBars(force = undefined) {
+    if (force === undefined) {
+        gameData.settings.vfx.followProgressBars = !gameData.settings.vfx.followProgressBars;
+    } else {
+        gameData.settings.vfx.followProgressBars = force;
+    }
+    VFX.followProgressBars(gameData.settings.vfx.followProgressBars);
+    gameData.save();
+}
+
+/**
+ * @param {boolean} force
+ */
 function toggleLightDarkMode(force = undefined) {
     if (force === undefined) {
         gameData.settings.darkMode = !gameData.settings.darkMode;
@@ -1655,6 +2023,9 @@ function toggleLightDarkMode(force = undefined) {
     gameData.save();
 }
 
+/**
+ * @param {boolean} force
+ */
 function toggleSciFiMode(force = undefined) {
     const body = document.getElementById('body');
     gameData.settings.sciFiMode = body.classList.toggle('sci-fi', force);
@@ -1681,71 +2052,84 @@ function resetBattle(name) {
     battle.xp = 0;
 }
 
-function rebirthOne() {
-    gameData.rebirthOneCount += 1;
-    rebirthReset();
+function startNewPlaythrough() {
+    gameData.bossEncounterCount += 1;
+    playthroughReset('UPDATE_MAX_LEVEL');
 }
 
-function rebirthTwo() {
-    gameData.rebirthTwoCount += 1;
-    rebirthReset();
-    resetMaxLevels();
-}
+// function rebirthTwo() {
+//     gameData.rebirthTwoCount += 1;
+//     playthroughReset('RESET_MAX_LEVEL');
+// }
 
-function rebirthReset() {
-    setTab('modules');
-
+/**
+ * @param {MaxLevelBehavior} maxLevelBehavior
+ */
+function playthroughReset(maxLevelBehavior) {
+    gameData.initValues();
     gameData.resetCurrentValues();
 
-    for (const key in moduleOperations) {
-        const operation = moduleOperations[key];
-        operation.updateMaxLevelAndReset();
-    }
-
-    gridStrength.updateMaxLevelAndReset();
-
-    for (const key in battles) {
-        const battle = battles[key];
-        battle.updateMaxLevelAndReset();
+    for (const key in moduleCategories) {
+        const category = moduleCategories[key];
+        category.reset(maxLevelBehavior);
     }
 
     for (const key in modules) {
         const module = modules[key];
-        module.updateMaxLevel();
+        module.reset(maxLevelBehavior);
     }
-}
 
-function resetMaxLevels() {
+    for (const key in moduleComponents) {
+        const component = moduleComponents[key];
+        component.reset(maxLevelBehavior);
+    }
+
     for (const key in moduleOperations) {
         const operation = moduleOperations[key];
-        operation.maxLevel = 0;
+        operation.reset(maxLevelBehavior);
     }
 
-    gridStrength.maxLevel = 0;
+    gridStrength.reset(maxLevelBehavior);
 
     for (const key in battles) {
         const battle = battles[key];
-        battle.maxLevel = 0;
+        battle.reset(maxLevelBehavior);
     }
+
+    for (const key in moduleCategories) {
+        const category = moduleCategories[key];
+        category.reset(maxLevelBehavior);
+    }
+
+    for (const key in sectors) {
+        const sector = sectors[key];
+        sector.reset(maxLevelBehavior);
+    }
+
+    for (const key in pointsOfInterest) {
+        const pointOfInterest = pointsOfInterest[key];
+        pointOfInterest.reset(maxLevelBehavior);
+    }
+
+    for (const key in htmlElementRequirements) {
+        const elementRequirement = htmlElementRequirements[key];
+        elementRequirement.reset();
+    }
+
+    setTab('modules');
+    gameData.transitionState(gameStates.NEW);
 }
 
-function getLifespan() {
+function getBossAppearanceCycle() {
     //Lifespan not defined in station design, if years are not reset this will break the game
     //const immortality = gameData.taskData['Immortality'];
     //const superImmortality = gameData.taskData['Super immortality'];
-    //return baseLifespan * immortality.getEffect() * superImmortality.getEffect();
-    return Number.MAX_VALUE;
+    //return bossAppearanceCycle * immortality.getEffect() * superImmortality.getEffect();
+    return bossAppearanceCycle;
 }
 
-function isAlive() {
-    return gameData.days < getLifespan();
-}
-
-/**
- * Player is alive and game is not paused aka the game is actually running.
- */
-function isPlaying() {
-    return !gameData.paused && isAlive();
+function isBossBattleAvailable() {
+    return gameData.bossBattleAvailable;
 }
 
 function updateUI() {
@@ -1754,16 +2138,15 @@ function updateUI() {
         return;
     }
 
-    updateModuleCategoryRows();
-    updateModuleRows();
-    updateModuleOperationRows();
+    updateModulesUI();
 
     updateBattleRows();
     updateSectorRows();
+    updateGalacticSecretRows();
 
-    updateHeaderRows();
     updateModulesQuickDisplay();
     updateBattlesQuickDisplay();
+    updateLocationQuickDisplay();
     updateAttributeRows();
 
     updateHtmlElementRequirements();
@@ -1773,7 +2156,10 @@ function updateUI() {
 }
 
 function update() {
-    increaseDays();
+    increaseCycle();
+    updateBossDistance();
+    progressGalacticSecrets();
+    activateComponentOperations();
     doTasks();
     updatePopulation();
     updateUI();
@@ -1785,21 +2171,30 @@ function rerollStationName() {
 
 const visibleTooltips = [];
 
+/**
+ *
+ * @param {HTMLElement} tooltipTriggerElement
+ * @param {Object} tooltipConfig
+ */
+function initTooltip(tooltipTriggerElement, tooltipConfig) {
+    const mergedTooltipConfig = Object.assign({container: 'body', trigger: 'hover', sanitize: false}, tooltipConfig);
+    // noinspection JSUnresolvedReference
+    new bootstrap.Tooltip(tooltipTriggerElement, mergedTooltipConfig);
+    tooltipTriggerElement.addEventListener('show.bs.tooltip', () => {
+        visibleTooltips.push(tooltipTriggerElement);
+    });
+    tooltipTriggerElement.addEventListener('hide.bs.tooltip', () => {
+        let indexOf = visibleTooltips.indexOf(tooltipTriggerElement);
+        if (indexOf !== -1) {
+            visibleTooltips.splice(indexOf);
+        }
+    });
+}
+
 function initTooltips() {
     const tooltipTriggerElements = document.querySelectorAll('[title], [data-bs-title]');
-    const tooltipConfig = {container: 'body', trigger: 'hover', sanitize: false};
     for (const tooltipTriggerElement of tooltipTriggerElements) {
-        // noinspection JSUnresolvedReference
-        new bootstrap.Tooltip(tooltipTriggerElement, tooltipConfig);
-        tooltipTriggerElement.addEventListener('show.bs.tooltip', () => {
-            visibleTooltips.push(tooltipTriggerElement);
-        });
-        tooltipTriggerElement.addEventListener('hide.bs.tooltip', () => {
-            let indexOf = visibleTooltips.indexOf(tooltipTriggerElement);
-            if (indexOf !== -1) {
-                visibleTooltips.splice(indexOf);
-            }
-        });
+        initTooltip(tooltipTriggerElement, {});
     }
 }
 
@@ -1826,6 +2221,10 @@ function initStationName() {
         event.preventDefault();
 
         setTab('settings');
+        /** @var {HTMLInputElement} */
+        const settingsStationNameInput = Dom.get().byId('settingsStationNameInput');
+        settingsStationNameInput.focus();
+        settingsStationNameInput.select();
     });
     for (const stationNameInput of Dom.get().allByClass('stationNameInput')) {
         stationNameInput.placeholder = emptyStationName;
@@ -1847,6 +2246,8 @@ function initSettings() {
     if (isBoolean(gameData.settings.sciFiMode)) {
         toggleSciFiMode(gameData.settings.sciFiMode);
     }
+    // gameData.settings.vfx.followProgressBars is applied in the VFX module itself - we just need to adjust the UI
+    Dom.get().byId('vfxProgressBarFollowSwitch').checked = gameData.settings.vfx.followProgressBars;
 }
 
 function displayLoaded() {
@@ -1860,6 +2261,7 @@ function assignNames(data) {
 }
 
 function initConfigNames() {
+    assignNames(gameStates);
     gridStrength.name = 'gridStrength';
     assignNames(attributes);
     assignNames(moduleCategories);
@@ -1870,6 +2272,7 @@ function initConfigNames() {
     assignNames(battles);
     assignNames(pointsOfInterest);
     assignNames(sectors);
+    assignNames(galacticSecrets);
 }
 
 function init() {
@@ -1883,14 +2286,12 @@ function init() {
      */
     gameData.skipSave = true;
 
-    const saveGameFound = gameData.tryLoading();
-    if (saveGameFound === false) {
-        GameEvents.NewGameStarted.trigger(undefined);
-    }
+    gameData.tryLoading();
 
     createModulesUI(moduleCategories, 'modulesTable');
     createSectorsUI(sectors, 'sectorTable');
     createBattlesUI(battles, 'battlesTable');
+    createGalacticSecretsUI(galacticSecrets, 'galacticSecrets');
     createModulesQuickDisplay();
     createBattlesQuickDisplay();
 
@@ -1900,8 +2301,6 @@ function init() {
     createAttributesDisplay();
     createAttributesUI();
     createEnergyGridDisplay();
-
-    //setCustomEffects();
 
     if (tabButtons.hasOwnProperty(gameData.selectedTab)) {
         setTab(gameData.selectedTab);
@@ -1915,6 +2314,7 @@ function init() {
     cleanUpDom();
 
     gameData.skipSave = false;
+    gameData.save();
     displayLoaded();
 
     update();

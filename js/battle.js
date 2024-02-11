@@ -61,7 +61,7 @@ class Battle extends LayeredTask {
         super({
             title: baseData.title + ' ' + baseData.faction.title,
             description: baseData.faction.description,
-            maxXp: baseData.faction.maxXp,
+            maxXp: baseData.faction.maxXp * baseData.targetLevel,
             effects: baseData.effects,
             targetLevel: baseData.targetLevel,
             requirements: undefined,
@@ -69,10 +69,7 @@ class Battle extends LayeredTask {
 
         this.faction = baseData.faction;
         this.rewards = baseData.rewards;
-    }
 
-    collectEffects() {
-        super.collectEffects();
         this.xpMultipliers.push(attributes.military.getValue);
     }
 
@@ -80,11 +77,11 @@ class Battle extends LayeredTask {
         return 1;
     }
 
-    isActive(){
+    isActive() {
         return gameData.activeEntities.battles.has(this.name);
     }
 
-    toggle(){
+    toggle() {
         if (this.isActive()) {
             this.stop();
         } else {
@@ -92,7 +89,7 @@ class Battle extends LayeredTask {
         }
     }
 
-    start(){
+    start() {
         if (this.isDone()) {
             // Can't activate completed battles
             return;
@@ -101,7 +98,7 @@ class Battle extends LayeredTask {
         gameData.activeEntities.battles.add(this.name);
     }
 
-    stop(){
+    stop() {
         gameData.activeEntities.battles.delete(this.name);
     }
 
@@ -121,10 +118,16 @@ class Battle extends LayeredTask {
         return Effect.getValue(this, effectType, this.effects, 1);
     }
 
-    getRewardsDescription(){
+    getRewardsDescription() {
         return Effect.getDescription(this, this.rewards, 1);
     }
 }
+
+/**
+ * @typedef {TaskSavedValues} BossBattleSavedValues
+ * @property {number} distance
+ * @property {number} coveredDistance
+ */
 
 class BossBattle extends Battle {
     /**
@@ -135,28 +138,119 @@ class BossBattle extends Battle {
      *     faction: FactionDefinition,
      *     effects: EffectDefinition[],
      *     rewards: EffectDefinition[],
-     *     progressBarId: string,
-     *     layerLabel: string,
      * }} baseData
      */
     constructor(baseData) {
         super(baseData);
-        this.progressBarId = baseData.progressBarId;
-        this.layerLabel = baseData.layerLabel;
     }
 
-    increaseXp(ignoreDeath = true) {
-        super.increaseXp(ignoreDeath);
+    /**
+     * @param {BossBattleSavedValues} savedValues
+     */
+    loadValues(savedValues) {
+        validateParameter(savedValues, {
+            level: JsTypes.Number,
+            maxLevel: JsTypes.Number,
+            xp: JsTypes.Number,
+            requirementCompleted: JsTypes.Array,
+            distance: JsTypes.Number,
+            coveredDistance: JsTypes.Number,
+        }, this);
+        this.savedValues = savedValues;
+    }
+
+    /**
+     *
+     * @return {BossBattleSavedValues}
+     */
+    static newSavedValues() {
+        return {
+            level: 0,
+            maxLevel: 0,
+            xp: 0,
+            requirementCompleted: [],
+            distance: bossBattleDefaultDistance,
+            coveredDistance: 0,
+        };
+    }
+
+    /**
+     * @return {BossBattleSavedValues}
+     */
+    getSavedValues() {
+        return this.savedValues;
+    }
+
+    get distance() {
+        return this.savedValues.distance - this.coveredDistance;
+    }
+
+    get coveredDistance() {
+        return this.savedValues.coveredDistance;
+    }
+
+    /**
+     * @param {number} coveredDistance
+     */
+    set coveredDistance(coveredDistance) {
+        this.savedValues.coveredDistance = coveredDistance;
+        if (this.distance <= 0) {
+            gameData.transitionState(gameStates.BOSS_FIGHT_INTRO);
+        }
+    }
+
+    decrementDistance() {
+        if (this.distance <= 0) return;
+
+        this.savedValues.distance = (this.savedValues.distance - 1);
+        if (this.distance <= 0) {
+            gameData.transitionState(gameStates.BOSS_FIGHT_INTRO);
+        }
+    }
+
+    /**
+     * @param {MaxLevelBehavior} maxLevelBehavior
+     */
+    reset(maxLevelBehavior) {
+        super.reset(maxLevelBehavior);
+
+        this.savedValues.distance = bossBattleDefaultDistance;
+        this.savedValues.coveredDistance = 0;
+    }
+
+    /**
+     * @return {boolean}
+     */
+    isProgressing() {
+        return gameData.state.isBossBattleProgressing;
+    }
+
+    onLevelUp(previousLevel, newLevel) {
+        super.onLevelUp(previousLevel, newLevel);
+
+        for(let level = previousLevel; level < newLevel; level++) {
+            gameData.essenceOfUnknown += Math.pow(2, level);
+        }
+    }
+
+    stop() {
+        // Undefeated boss battle can not be stopped
+        if (!this.isDone()) return;
+
+        super.stop();
     }
 
     onDone() {
         super.onDone();
-        GameEvents.GameOver.trigger({
-            bossDefeated: true,
-        });
+        gameData.transitionState(gameStates.BOSS_DEFEATED);
     }
 
-    getRewardsDescription(){
+    // noinspection JSCheckFunctionSignatures
+    getEffectDescription() {
+        return super.getEffectDescription(1);
+    }
+
+    getRewardsDescription() {
         return 'Essence of Unknown';
     }
 }

@@ -67,6 +67,10 @@
     margin-top: 0.5rem;
 }
 
+.header-row {
+    white-space: nowrap;
+}
+
 .level4 > tr > .gridLoad {
     transform-origin: right;
 }
@@ -86,7 +90,7 @@
     top: 77px;
 }
 
-:is(#modules, #location, #battles) {
+:is(#modules, #location, #battles, #galacticSecrets) {
     .table :is(td,th):first-of-type {
         width: var(--main-column-width);
     }
@@ -102,7 +106,8 @@
     & td {
         &.value,
         &.modifier,
-        &.rewards {
+        &.rewards,
+        &.danger {
             max-width: 10rem;
             /* Squeeze in those two liners */
             line-height: 1.1rem;
@@ -115,7 +120,7 @@
         }
 
         &.help-text {
-            color: rgb(128, 128, 128);
+            color: rgb(172, 172, 172);
         }
 
         & data {

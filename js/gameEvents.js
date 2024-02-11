@@ -101,15 +101,20 @@ class GameEvent {
 }
 
 const GameEvents = {
+    IncompatibleVersionFound: new GameEvent({
+        savedVersion: JsTypes.Number,
+        expectedVersion: JsTypes.Number,
+    }),
     NewGameStarted: new GameEvent(undefined),
+    GameStateChanged: new GameEvent({
+        previousState: JsTypes.String,
+        newState: JsTypes.String,
+    }),
     TaskLevelChanged: new GameEvent({
         type: JsTypes.String,
         name: JsTypes.String,
         previousLevel: JsTypes.Number,
         nextLevel: JsTypes.Number
     }, false),
-    Death: new GameEvent(undefined),
-    GameOver: new GameEvent({
-        bossDefeated: JsTypes.Boolean,
-    }),
+    BossAppearance: new GameEvent(undefined),
 };

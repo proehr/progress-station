@@ -19,6 +19,10 @@
  */
 
 /**
+ * @typedef {'RESET_MAX_LEVEL'|'UPDATE_MAX_LEVEL'} MaxLevelBehavior
+ */
+
+/**
  * Saved Values that do not (yet) contain any values.
  * These are implemented to enforce a schema that all entities are able to load and save data.
  * @typedef {Object} EmptySavedValues
@@ -52,26 +56,13 @@ class Entity {
      * @param {string|undefined} description
      * @param {Requirement[]|undefined} [requirements=undefined]
      */
-    constructor(title, description, requirements = undefined) {
+    constructor(title, description) {
         this.type = this.constructor.name;
         this.title = prepareTitle(title);
         this.description = description;
         /** @var {Requirement[]} */
-        this.requirements = requirements;
+        this.requirements = [];
 
-        if (Array.isArray(this.requirements)) {
-            // Use Array.prototype.forEach to a) have an index and b) capture it
-            this.requirements.forEach((requirement, index) => {
-                requirement.registerSaveAndLoad((completed) => {
-                    this.getSavedValues().requirementCompleted[index] = completed;
-                }, () => {
-                    if (isUndefined(this.getSavedValues().requirementCompleted[index])) {
-                        this.getSavedValues().requirementCompleted[index] = false;
-                    }
-                    return this.getSavedValues().requirementCompleted[index];
-                });
-            });
-        }
     }
 
     get name() {
@@ -87,6 +78,23 @@ class Entity {
         this.domId = 'row_' + this.type + '_' + name;
     }
 
+    registerRequirementInternal(requirement, index) {
+        requirement.registerSaveAndLoad((completed) => {
+            this.getSavedValues().requirementCompleted[index] = completed;
+        }, () => {
+            if (isUndefined(this.getSavedValues().requirementCompleted[index])) {
+                this.getSavedValues().requirementCompleted[index] = false;
+            }
+            return this.getSavedValues().requirementCompleted[index];
+        });
+    }
+
+    registerRequirement(requirement) {
+        const index = this.requirements.push(requirement) - 1;
+        this.registerRequirementInternal(requirement, index);
+        return requirement;
+    }
+
     loadValues(savedValues) {
         // Abstract method that needs to be implemented by each subclass
         throw new TypeError('loadValues not implemented by ' + this.constructor.name);
@@ -97,7 +105,7 @@ class Entity {
      *     requirementCompleted: boolean[]
      * }}
      */
-    getSavedValues(){
+    getSavedValues() {
         throw new TypeError('getSavedValues not implemented by ' + this.constructor.name);
     }
 
@@ -106,6 +114,12 @@ class Entity {
      */
     getUnfulfilledRequirements() {
         return Requirement.getUnfulfilledRequirements(this.requirements);
+    }
+
+    reset() {
+        for (const requirement of this.requirements) {
+            requirement.reset();
+        }
     }
 }
 
@@ -127,17 +141,17 @@ class Task extends Entity {
      *     description?: string,
      *     maxXp: number,
      *     effects: EffectDefinition[],
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, baseData.requirements);
+        super(baseData.title, baseData.description);
 
         this.maxXp = baseData.maxXp;
         this.effects = baseData.effects;
         this.xpMultipliers = [];
-        // TODO necessary? rename
-        this.collectEffects();
+        this.xpMultipliers.push(this.getMaxLevelMultiplier.bind(this));
+        // Yey lazy functions
+        this.xpMultipliers.push(() => getPopulationProgressSpeedMultiplier());
     }
 
     /**
@@ -197,7 +211,16 @@ class Task extends Entity {
         this.savedValues.xp = xp;
     }
 
+    /**
+     * @return {boolean}
+     */
+    isProgressing() {
+        return gameData.state.areTasksProgressing;
+    }
+
     do() {
+        if (!this.isProgressing()) return;
+
         this.increaseXp();
     }
 
@@ -214,12 +237,6 @@ class Task extends Entity {
      */
     getDelta() {
         return this.getXpGain() / this.getMaxXp();
-    }
-
-    collectEffects() {
-        this.xpMultipliers.push(this.getMaxLevelMultiplier.bind(this));
-        // Yey lazy functions
-        this.xpMultipliers.push(() => getPopulationProgressSpeedMultiplier());
     }
 
     /**
@@ -246,14 +263,17 @@ class Task extends Entity {
     }
 
     /**
+     * @param {number} [levelOverride] if provided, the returned text will use the provided
+     *                                 level instead of the current level of this task.
      * @return {string}
      */
-    getEffectDescription() {
-        return Effect.getDescription(this, this.effects, this.level);
+    getEffectDescription(levelOverride = undefined) {
+        const level = isNumber(levelOverride) ? levelOverride : this.level;
+        return Effect.getDescription(this, this.effects, level);
     }
 
-    increaseXp(ignoreDeath = false) {
-        this.xp += applySpeed(this.getXpGain(), ignoreDeath);
+    increaseXp() {
+        this.xp += applySpeed(this.getXpGain());
         if (this.xp >= this.getMaxXp()) {
             this.levelUp();
         }
@@ -265,24 +285,44 @@ class Task extends Entity {
         while (excess >= 0) {
             this.level += 1;
             excess -= this.getMaxXp();
+
+            if (isDefined(this.targetLevel) && this.level === this.targetLevel) {
+                break;
+            }
         }
         if (this.level > previousLevel) {
-            GameEvents.TaskLevelChanged.trigger({
-                type: this.type,
-                name: this.name,
-                previousLevel: previousLevel,
-                nextLevel: this.level,
-            });
+            this.onLevelUp(previousLevel, this.level);
         }
         this.xp = this.getMaxXp() + excess;
     }
 
-    updateMaxLevelAndReset() {
-        if (this.level > this.maxLevel) {
-            this.maxLevel = this.level;
-        }
+    onLevelUp(previousLevel, newLevel) {
+        GameEvents.TaskLevelChanged.trigger({
+            type: this.type,
+            name: this.name,
+            previousLevel: previousLevel,
+            nextLevel: newLevel,
+        });
+    }
+
+    /**
+     * @param {MaxLevelBehavior} maxLevelBehavior
+     */
+    reset(maxLevelBehavior) {
+        super.reset(maxLevelBehavior);
+
         this.level = 0;
         this.xp = 0;
+        switch (maxLevelBehavior) {
+            case 'UPDATE_MAX_LEVEL':
+                if (this.level > this.maxLevel) {
+                    this.maxLevel = this.level;
+                }
+                break;
+            case 'RESET_MAX_LEVEL':
+                this.maxLevel = 0;
+                break;
+        }
     }
 }
 
@@ -310,7 +350,7 @@ class GridStrength extends Task {
 
 
 /**
- * @typedef {Object} ModuleCategprySavedValues
+ * @typedef {Object} ModuleCategorySavedValues
  * @property {boolean[]} requirementCompleted
  */
 
@@ -323,28 +363,27 @@ class ModuleCategory extends Entity {
      *     description?: string,
      *     color: string
      *     modules: Module[],
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, baseData.requirements);
+        super(baseData.title, baseData.description);
 
         this.modules = baseData.modules;
         this.color = baseData.color;
     }
 
     /**
-     * @param {ModuleCategprySavedValues} savedValues
+     * @param {ModuleCategorySavedValues} savedValues
      */
     loadValues(savedValues) {
         validateParameter(savedValues, {
-            requirementCompleted: JsTypes.Array
+            requirementCompleted: JsTypes.Array,
         }, this);
         this.savedValues = savedValues;
     }
 
     /**
-     * @return {ModuleCategprySavedValues}
+     * @return {ModuleCategorySavedValues}
      */
     static newSavedValues() {
         return {
@@ -353,7 +392,7 @@ class ModuleCategory extends Entity {
     }
 
     /**
-     * @return {ModuleCategprySavedValues}
+     * @return {ModuleCategorySavedValues}
      */
     getSavedValues() {
         return this.savedValues;
@@ -374,11 +413,10 @@ class Module extends Entity {
      *     title: string,
      *     description?: string,
      *     components: ModuleComponent[],
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, baseData.requirements);
+        super(baseData.title, baseData.description);
 
         this.data = baseData;
         this.components = baseData.components;
@@ -446,34 +484,59 @@ class Module extends Entity {
         return this.components.reduce((levelSum, component) => levelSum + component.getOperationLevels(), 0);
     }
 
-    updateMaxLevel() {
-        const currentLevel = this.getLevel();
-        if (currentLevel > this.maxLevel) {
-            this.maxLevel = currentLevel;
+    /**
+     *
+     * @param {MaxLevelBehavior} maxLevelBehavior
+     */
+    reset(maxLevelBehavior) {
+        super.reset(maxLevelBehavior);
+
+        switch (maxLevelBehavior) {
+            case 'UPDATE_MAX_LEVEL':
+                const currentLevel = this.getLevel();
+                if (currentLevel > this.maxLevel) {
+                    this.maxLevel = currentLevel;
+                }
+                break;
+            case 'RESET_MAX_LEVEL':
+                this.maxLevel = 0;
+                break;
         }
     }
 
+    /**
+     * @return {number}
+     */
     getGridLoad() {
-        return this.components.reduce(
-            (gridLoadSum, component) => gridLoadSum + component.getActiveOperation().getGridLoad(),
-            0);
+        return this.components
+            .filter(component => component.getActiveOperation() !== null)
+            .reduce((gridLoadSum, component) => {
+                return gridLoadSum + component.getActiveOperation().getGridLoad();
+            }, 0);
     }
 }
+
+/**
+ * @typedef {Object} ModuleComponentSavedValues
+ * @property {boolean[]} requirementCompleted
+ */
 
 class ModuleComponent extends Entity {
 
     /** @var {Module} */
     module = null;
+    /** @var {ModuleOperation} */
+    activeOperation = null;
 
     /**
      * @param {{
      *     title: string,
      *     description?: string,
-     *     operations: ModuleOperation[]
+     *     operations: ModuleOperation[],
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, undefined);
+        super(baseData.title, baseData.description);
 
         this.operations = baseData.operations;
     }
@@ -486,34 +549,31 @@ class ModuleComponent extends Entity {
         this.module = module;
 
         for (const operation of this.operations) {
-            operation.registerModule(module);
+            operation.registerModule(module, this);
         }
     }
 
     /**
-     * @param {EmptySavedValues} savedValues
+     * @param {ModuleComponentSavedValues} savedValues
      */
     loadValues(savedValues) {
-        validateParameter(savedValues, {}, this);
-
-        this.activeOperation = this.operations.find(operation => operation.isActive('self'));
-        // No operation was active yet --> fall back to first configured operation as fallback
-        if (isUndefined(this.activeOperation)) {
-            // TODO include in save game
-            this.activeOperation = this.operations[0];
-            this.activeOperation.setActive(true);
-        }
+        validateParameter(savedValues, {
+            requirementCompleted: JsTypes.Array,
+        }, this);
+        this.savedValues = savedValues;
     }
 
     /**
-     * @return {EmptySavedValues}
+     * @return {ModuleComponentSavedValues}
      */
     static newSavedValues() {
-        return {};
+        return {
+            requirementCompleted: [],
+        };
     }
 
     /**
-     * @return {EmptySavedValues}
+     * @return {ModuleComponentSavedValues}
      */
     getSavedValues() {
         return this.savedValues;
@@ -542,12 +602,24 @@ class ModuleComponent extends Entity {
         }
         return levels;
     }
+
+    /**
+     * @param {MaxLevelBehavior} maxLevelBehavior
+     */
+    reset(maxLevelBehavior) {
+        super.reset(maxLevelBehavior);
+
+        this.activeOperation = null;
+    }
 }
 
 class ModuleOperation extends Task {
 
     /** @var {Module} */
     module = null;
+
+    /** @var {ModuleComponent} */
+    component = null;
 
     /**
      * @param {{
@@ -556,12 +628,12 @@ class ModuleOperation extends Task {
      *     maxXp: number,
      *     gridLoad: number,
      *     effects: EffectDefinition[]
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
         super(baseData);
         this.gridLoad = baseData.gridLoad;
+        this.xpMultipliers.push(attributes.industry.getValue);
     }
 
     get maxLevel() {
@@ -569,20 +641,18 @@ class ModuleOperation extends Task {
     }
 
     set maxLevel(maxLevel) {
-        throw new TypeError('ModuleOperations only inherit the maxLevel of their modules but can not modify it.');
+        // Do nothing
+        // throw new TypeError('ModuleOperations only inherit the maxLevel of their modules but can not modify it.');
     }
 
     /**
      * @param {Module} module
+     * @param {ModuleComponent} component
      */
-    registerModule(module) {
+    registerModule(module, component) {
         console.assert(this.module === null, 'Module already registered.');
         this.module = module;
-    }
-
-    collectEffects() {
-        super.collectEffects();
-        this.xpMultipliers.push(attributes.industry.getValue);
+        this.component = component;
     }
 
     /**
@@ -643,14 +713,16 @@ class Sector extends Entity {
      *     description?: string,
      *     color: string,
      *     pointsOfInterest: PointOfInterest[]
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, baseData.requirements);
+        super(baseData.title, baseData.description);
 
         this.color = baseData.color;
         this.pointsOfInterest = baseData.pointsOfInterest;
+        for (const pointOfInterest of this.pointsOfInterest) {
+            pointOfInterest.registerSector(this);
+        }
     }
 
     /**
@@ -658,7 +730,7 @@ class Sector extends Entity {
      */
     loadValues(savedValues) {
         validateParameter(savedValues, {
-            requirementCompleted: JsTypes.Array
+            requirementCompleted: JsTypes.Array,
         }, this);
         this.savedValues = savedValues;
     }
@@ -691,6 +763,9 @@ class Sector extends Entity {
  * @implements EffectsHolder
  */
 class PointOfInterest extends Entity {
+    /** @var {Sector} */
+    sector = null;
+
     /**
      *
      * @param {{
@@ -698,14 +773,21 @@ class PointOfInterest extends Entity {
      *     description?: string,
      *     effects: EffectDefinition[],
      *     modifiers: ModifierDefinition[],
-     *     requirements?: Requirement[]
      * }} baseData
      */
     constructor(baseData) {
-        super(baseData.title, baseData.description, baseData.requirements);
+        super(baseData.title, baseData.description);
 
         this.effects = baseData.effects;
         this.modifiers = baseData.modifiers;
+    }
+
+    /**
+     * @param {Sector} sector
+     */
+    registerSector(sector) {
+        console.assert(this.sector === null, 'Sector already registered.');
+        this.sector = sector;
     }
 
     /**
@@ -713,7 +795,7 @@ class PointOfInterest extends Entity {
      */
     loadValues(savedValues) {
         validateParameter(savedValues, {
-            requirementCompleted: JsTypes.Array
+            requirementCompleted: JsTypes.Array,
         }, this);
         this.savedValues = savedValues;
     }
@@ -737,11 +819,6 @@ class PointOfInterest extends Entity {
      */
     isActive() {
         return gameData.activeEntities.pointOfInterest === this.name;
-    }
-
-    collectEffects() {
-        //this.expenseMultipliers.push(getBoundTaskEffect('Bargaining'));
-        //this.expenseMultipliers.push(getBoundTaskEffect('Intimidation'));
     }
 
     /**
@@ -768,9 +845,97 @@ class PointOfInterest extends Entity {
     }
 }
 
+/**
+ * @typedef {Object} GalacticSecretSavedValues
+ * @property {boolean} unlocked
+ * @property {boolean[]} requirementCompleted
+ */
+
+class GalacticSecret extends Entity {
+    /**
+     * 0.0 - 1.0
+     * @type {number}
+     */
+    unlockProgress = 0;
+    inProgress = false;
+    lastUpdate = performance.now();
+
+    /**
+     * @param {{
+     *     unlocks: ModuleOperation,
+     * }} baseData
+     */
+    constructor(baseData) {
+        super(GalacticSecret.#createTitle(baseData.unlocks), baseData.unlocks.description);
+
+        this.unlocks = baseData.unlocks;
+        this.unlocks.registerRequirement(new GalacticSecretRequirement([{galacticSecret: this}]));
+    }
+
+    /**
+     * @param {ModuleOperation} unlock
+     */
+    static #createTitle(unlock) {
+        return unlock.component.title + ': ' + unlock.title;
+    }
+
+    /**
+     * @param {GalacticSecretSavedValues} savedValues
+     */
+    loadValues(savedValues) {
+        validateParameter(savedValues, {
+            unlocked: JsTypes.Boolean,
+            requirementCompleted: JsTypes.Array,
+        }, this);
+        this.savedValues = savedValues;
+    }
+
+    /**
+     * @return {GalacticSecretSavedValues}
+     */
+    static newSavedValues() {
+        return {
+            unlocked: false,
+            requirementCompleted: [],
+        };
+    }
+
+    /**
+     *
+     * @return {GalacticSecretSavedValues}
+     */
+    getSavedValues() {
+        return this.savedValues;
+    }
+
+    get isUnlocked() {
+        return this.savedValues.unlocked;
+    }
+
+    set isUnlocked(unlocked) {
+        this.savedValues.unlocked = unlocked;
+    }
+
+    update() {
+        const now = performance.now();
+        const timeDelta = now - this.lastUpdate;
+        this.lastUpdate = now;
+        if (this.inProgress) {
+            if (this.unlockProgress < 1) {
+                this.unlockProgress += timeDelta / galacticSecretUnlockDuration;
+            }
+        } else {
+            if (this.unlockProgress > 0) {
+                this.unlockProgress -= timeDelta / galacticSecretUnlockDuration;
+                if (this.unlockProgress < 0) {
+                    this.unlockProgress = 0;
+                }
+            }
+        }
+    }
+}
+
 class Requirement {
-    /** @var {boolean} */
-    #completed = false;
     /** @var {function(boolean)} */
     saveFn;
     /** @var {function(): boolean} */
@@ -800,10 +965,8 @@ class Requirement {
     set completed(completed) {
         switch (this.scope) {
             case 'permanent':
-                this.saveFn(completed);
-                break;
             case 'playthrough':
-                this.#completed = completed;
+                this.saveFn(completed);
                 break;
             case 'update':
                 // discard
@@ -817,9 +980,8 @@ class Requirement {
     get completed() {
         switch (this.scope) {
             case 'permanent':
-                return this.loadFn();
             case 'playthrough':
-                return this.#completed;
+                return this.loadFn();
             case 'update':
                 return false;
         }
@@ -840,6 +1002,20 @@ class Requirement {
         return true;
     }
 
+    reset() {
+        switch (this.scope) {
+            case 'permanent':
+                // Keep value
+                break;
+            case 'playthrough':
+                this.saveFn(false);
+                break;
+            case 'update':
+                // discarded anyway
+                break;
+        }
+    }
+
     /**
      * @return {boolean}
      */
@@ -854,7 +1030,7 @@ class Requirement {
         return '<span class="' + this.type + '">'
             + this.requirements
                 .filter(requirement => !this.getCondition(requirement))
-                .map(requirement => this.toHtmlInternal(requirement))
+                .map(requirement => this.toHtmlInternal(requirement).trim())
                 .join(', ')
             + '</span>';
     }
@@ -929,7 +1105,7 @@ class AgeRequirement extends Requirement {
      * @return {boolean}
      */
     getCondition(requirement) {
-        return daysToYears(gameData.days) >= requirement.requirement;
+        return gameData.cycles >= requirement.requirement;
     }
 
     /**
@@ -939,9 +1115,8 @@ class AgeRequirement extends Requirement {
     toHtmlInternal(requirement) {
         return `
 <span class="name">IC</span>
-<data value="${daysToYears(gameData.days)}">${daysToYears(gameData.days)}</data> /
-<data value="${requirement.requirement}">${requirement.requirement}</data>
-`;
+<data value="${gameData.cycles}">${gameData.cycles}</data> /
+<data value="${requirement.requirement}">${requirement.requirement}</data>`;
     }
 }
 
@@ -970,13 +1145,69 @@ class AttributeRequirement extends Requirement {
         const value = requirement.attribute.getValue();
         // TODO format value correctly
         return `
-<span class="name">${requirement.attribute.title}</span>
-level 
+<span class="name">${requirement.attribute.title}</span> 
 <data value="${value}">${value.toFixed(2)}</data> /
 <data value="${requirement.requirement}">${requirement.requirement}</data>
 `;
     }
 }
+
+class PointOfInterestVisitedRequirement extends Requirement {
+      /**
+     * @param {'permanent'|'playthrough'|'update'} scope
+     * @param {{pointOfInterest: PointOfInterest}[]} requirements
+     */
+    constructor(scope, requirements) {
+        super('PointOfInterestVisitedRequirement', scope, requirements);
+    }
+
+    /**
+     * @param {{pointOfInterest: PointOfInterest}} requirement
+     * @return {boolean}
+     */
+    getCondition(requirement) {
+        return requirement.pointOfInterest.isActive();
+    }
+
+    /**
+     * @param {{pointOfInterest: PointOfInterest}} requirement
+     * @return {string}
+     */
+    toHtmlInternal(requirement) {
+        return `visit <span class="name">${requirement.pointOfInterest.title}</span>`;
+    }
+}
+
+class GalacticSecretRequirement extends Requirement {
+    /**
+     * @param {{galacticSecret: GalacticSecret}[]} requirements
+     */
+    constructor(requirements) {
+        super('GalacticSecretRequirement', 'permanent', requirements);
+    }
+
+    /**
+     * @param {{galacticSecret: GalacticSecret}} requirement
+     * @return {boolean}
+     */
+    getCondition(requirement) {
+        return requirement.galacticSecret.isUnlocked;
+    }
+
+    /**
+     * @param {{galacticSecret: GalacticSecret}} requirement
+     * @return {string}
+     */
+    toHtmlInternal(requirement) {
+        return 'an unraveled Galactic Secret';
+    }
+}
+
+/**
+ * @typedef {Object} HtmlElementWithRequirementSavedValues
+ * @property {boolean[]} requirementCompleted
+ * @property {boolean[]} prerequirementCompleted
+ */
 
 class HtmlElementWithRequirement {
     /**
@@ -984,18 +1215,66 @@ class HtmlElementWithRequirement {
      *     elementsWithRequirements: HTMLElement[],
      *     requirements: Requirement[],
      *     elementsToShowRequirements?: HTMLElement[],
+     *     prerequirements?: Requirement[],
      * }} baseData
      */
     constructor(baseData) {
         this.elementsWithRequirements = baseData.elementsWithRequirements;
         this.requirements = baseData.requirements;
         this.elementsToShowRequirements = isUndefined(baseData.elementsToShowRequirements) ? [] : baseData.elementsToShowRequirements;
+        this.prerequirements = baseData.prerequirements;
 
-        for (const requirement of this.requirements) {
-            if (requirement.scope === 'permanent') {
-                throw new Error('Config Error: scope: permanent is not supported within HtmlElementWithRequirement.');
-            }
+        if (Array.isArray(this.requirements)) {
+            // Use Array.prototype.forEach to a) have an index and b) capture it
+            this.requirements.forEach(this.registerRequirementInternal, this);
+        } else {
+            this.requirements = [];
         }
+        if (Array.isArray(this.prerequirements)) {
+            // Use Array.prototype.forEach to a) have an index and b) capture it
+            this.prerequirements.forEach(this.registerPrerequirementInternal, this);
+        } else {
+            this.prerequirements = [];
+        }
+    }
+
+    registerPrerequirementInternal(requirement, index) {
+        requirement.registerSaveAndLoad((completed) => {
+            this.getSavedValues().prerequirementCompleted[index] = completed;
+        }, () => {
+            if (isUndefined(this.getSavedValues().prerequirementCompleted[index])) {
+                this.getSavedValues().prerequirementCompleted[index] = false;
+            }
+            return this.getSavedValues().prerequirementCompleted[index];
+        });
+    }
+
+    /**
+     * @param {HtmlElementWithRequirementSavedValues} savedValues
+     */
+    loadValues(savedValues) {
+        validateParameter(savedValues, {
+            requirementCompleted: JsTypes.Array,
+        }, this);
+        this.savedValues = savedValues;
+    }
+
+    /**
+     * @return {HtmlElementWithRequirementSavedValues}
+     */
+    static newSavedValues() {
+        return {
+            requirementCompleted: [],
+            prerequirementCompleted: [],
+        };
+    }
+
+    /**
+     *
+     * @return {HtmlElementWithRequirementSavedValues}
+     */
+    getSavedValues() {
+        return this.savedValues;
     }
 
     /**
@@ -1006,10 +1285,23 @@ class HtmlElementWithRequirement {
     }
 
     /**
+     * @return {boolean}
+     */
+    isVisible() {
+        return this.prerequirements.every(requirement => requirement.isCompleted());
+    }
+
+    /**
      * @return {string}
      */
     toHtml() {
-        return this.requirements.map(requirement => requirement.toHtml()).join(', ');
+        // TODO use #requirementsTemplate
+        return `<div class="requirements help-text">
+            Required:
+            <span class="rendered">
+                ${this.requirements.map(requirement => requirement.toHtml()).join(', ')}
+            </span>
+        </div>`;
     }
 
     /**
@@ -1018,4 +1310,13 @@ class HtmlElementWithRequirement {
     getUnfulfilledRequirements() {
         return Requirement.getUnfulfilledRequirements(this.requirements);
     }
+
+    reset() {
+        for (const requirement of this.requirements) {
+            requirement.reset();
+        }
+    }
 }
+
+// Funky cross-extension aka "Trait"
+HtmlElementWithRequirement.prototype.registerRequirementInternal = Entity.prototype.registerRequirementInternal;
